@@ -1,0 +1,430 @@
+openapi: 3.0.3
+info:
+  title: Link Metrics API
+  description: URL shortener with authenticated link management and public redirects.
+  version: 1.0.0
+
+servers:
+  - url: /
+    description: Default server
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/auth/register:
+    post:
+      operationId: registerUser
+      summary: Register a new user
+      description: Creates a new account. Public; no authentication required.
+      tags:
+        - Auth
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserCreatedResponse"
+        "400":
+          description: Validation failed (invalid email or password too short)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "409":
+          description: Email is already registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+
+  /api/auth/login:
+    post:
+      operationId: loginUser
+      summary: Log in and obtain a JWT
+      description: Authenticates credentials and returns a bearer token. Public; no authentication required.
+      tags:
+        - Auth
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokenResponse"
+        "401":
+          description: Invalid email or password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+
+  /api/links:
+    post:
+      operationId: createLink
+      summary: Create a shortened link
+      description: Creates a new short link for the authenticated user.
+      tags:
+        - Links
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateLinkRequest"
+      responses:
+        "201":
+          description: Link created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkResponse"
+        "400":
+          description: URL is invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /{shortCode}:
+    get:
+      operationId: redirectByShortCode
+      summary: Redirect to the original URL
+      description: Public redirect. Resolves a short code to the original URL. No authentication required.
+      tags:
+        - Redirect
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ShortCodePath"
+      responses:
+        "301":
+          description: Permanent redirect to the original URL
+          headers:
+            Location:
+              description: The original URL to redirect to
+              schema:
+                type: string
+                format: uri
+        "302":
+          description: Temporary redirect to the original URL
+          headers:
+            Location:
+              description: The original URL to redirect to
+              schema:
+                type: string
+                format: uri
+        "404":
+          description: Short code not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+
+  /api/links/{shortCode}/stats:
+    get:
+      operationId: getLinkStats
+      summary: Get click statistics for a link
+      description: |
+        Returns analytics for a short link owned by the authenticated user.
+        The backend must verify the link belongs to the authorized user.
+      tags:
+        - Links
+      parameters:
+        - $ref: "#/components/parameters/ShortCodePath"
+      responses:
+        "200":
+          description: Link statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkStatsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Link exists but belongs to another user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Short code not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT obtained from POST /api/auth/login
+
+  parameters:
+    ShortCodePath:
+      name: shortCode
+      in: path
+      required: true
+      description: Alphanumeric short code (5-10 characters)
+      schema:
+        $ref: "#/components/schemas/ShortCode"
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UnauthorizedError"
+
+  schemas:
+    Email:
+      type: string
+      format: email
+      example: user@example.com
+
+    Password:
+      type: string
+      format: password
+      minLength: 8
+      description: Minimum 8 characters
+      example: securepassword123
+
+    ShortCode:
+      type: string
+      pattern: "^[a-zA-Z0-9]{5,10}$"
+      minLength: 5
+      maxLength: 10
+      example: abc12
+
+    Url:
+      type: string
+      format: uri
+      example: https://example.com/very/long/path
+
+    DateTime:
+      type: string
+      format: date-time
+      example: "2026-05-27T12:00:00Z"
+
+    RegisterRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          $ref: "#/components/schemas/Email"
+        password:
+          $ref: "#/components/schemas/Password"
+      example:
+        email: user@example.com
+        password: securepassword123
+
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          $ref: "#/components/schemas/Email"
+        password:
+          $ref: "#/components/schemas/Password"
+      example:
+        email: user@example.com
+        password: securepassword123
+
+    AuthTokenResponse:
+      type: object
+      required:
+        - token
+      properties:
+        token:
+          type: string
+          description: JWT bearer token
+          example: JWT_TOKEN_STRING
+
+    UserCreatedResponse:
+      type: object
+      description: Minimal success body for registration (extend as needed)
+      properties:
+        email:
+          $ref: "#/components/schemas/Email"
+
+    CreateLinkRequest:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          $ref: "#/components/schemas/Url"
+      example:
+        url: https://example.com/very/long/path
+
+    LinkResponse:
+      type: object
+      required:
+        - id
+        - shortCode
+        - originalUrl
+        - createdAt
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Unique link identifier
+          example: 1
+        shortCode:
+          $ref: "#/components/schemas/ShortCode"
+        originalUrl:
+          $ref: "#/components/schemas/Url"
+        createdAt:
+          $ref: "#/components/schemas/DateTime"
+      example:
+        id: 1
+        shortCode: abc12
+        originalUrl: https://example.com/very/long/path
+        createdAt: "2026-05-27T12:00:00Z"
+
+    LinkStatsResponse:
+      type: object
+      required:
+        - shortCode
+        - originalUrl
+        - clickCount
+        - lastClickedAt
+      properties:
+        shortCode:
+          $ref: "#/components/schemas/ShortCode"
+        originalUrl:
+          $ref: "#/components/schemas/Url"
+        clickCount:
+          type: integer
+          minimum: 0
+          example: 42
+        lastClickedAt:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/DateTime"
+          description: ISO 8601 datetime of the most recent click, or null if never clicked
+      example:
+        shortCode: abc12
+        originalUrl: https://example.com/very/long/path
+        clickCount: 42
+        lastClickedAt: "2026-05-27T14:30:00Z"
+
+    ErrorDetail:
+      type: object
+      properties:
+        field:
+          type: string
+          description: Request field that failed validation
+        message:
+          type: string
+          description: Human-readable error message
+
+    ValidationError:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          enum:
+            - validation_error
+          example: validation_error
+        message:
+          type: string
+          example: Invalid email or password must be at least 8 characters
+        details:
+          type: array
+          items:
+            $ref: "#/components/schemas/ErrorDetail"
+
+    ConflictError:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          enum:
+            - conflict
+          example: conflict
+        message:
+          type: string
+          example: Email is already registered
+
+    UnauthorizedError:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          enum:
+            - unauthorized
+          example: unauthorized
+        message:
+          type: string
+          example: Invalid credentials
+
+    ForbiddenError:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          enum:
+            - forbidden
+          example: forbidden
+        message:
+          type: string
+          example: You do not have access to this link
+
+    NotFoundError:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          enum:
+            - not_found
+          example: not_found
+        message:
+          type: string
+          example: Short code not found
+
+tags:
+  - name: Auth
+    description: Registration and login
+  - name: Links
+    description: Authenticated link management and analytics
+  - name: Redirect
+    description: Public short-link redirects
