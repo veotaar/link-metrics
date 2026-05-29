@@ -225,6 +225,12 @@ components:
       format: date-time
       example: "2026-05-27T12:00:00Z"
 
+    Uuid:
+      type: string
+      format: uuid
+      description: UUIDv7 identifier (PostgreSQL uuidv7())
+      example: "0197f96c-b278-7f64-a32f-dae3cabe1ff0"
+
     RegisterRequest:
       type: object
       required:
@@ -265,10 +271,17 @@ components:
 
     UserCreatedResponse:
       type: object
-      description: Minimal success body for registration (extend as needed)
+      required:
+        - id
+        - email
       properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
         email:
           $ref: "#/components/schemas/Email"
+      example:
+        id: "0197f96c-b278-7f64-a32f-dae3cabe1ff0"
+        email: user@example.com
 
     CreateLinkRequest:
       type: object
@@ -283,16 +296,13 @@ components:
     LinkResponse:
       type: object
       required:
-        - id
+        - userId
         - shortCode
         - originalUrl
         - createdAt
       properties:
-        id:
-          type: integer
-          format: int64
-          description: Unique link identifier
-          example: 1
+        userId:
+          $ref: "#/components/schemas/Uuid"
         shortCode:
           $ref: "#/components/schemas/ShortCode"
         originalUrl:
@@ -300,7 +310,7 @@ components:
         createdAt:
           $ref: "#/components/schemas/DateTime"
       example:
-        id: 1
+        userId: "0197f96c-b278-7f64-a32f-dae3cabe1ff0"
         shortCode: abc12
         originalUrl: https://example.com/very/long/path
         createdAt: "2026-05-27T12:00:00Z"
