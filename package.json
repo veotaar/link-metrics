@@ -11,11 +11,10 @@
     "check-types": "turbo run check-types"
   },
   "devDependencies": {
-    "@typescript/native-preview": "7.0.0-dev.20260522.1",
     "oxfmt": "^0.51.0",
-    "oxlint": "^1.66.0",
-    "turbo": "^2.9.14",
-    "typescript": "6.0.3"
+    "oxlint": "^1.70.0",
+    "turbo": "^2.9.18",
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=26"
