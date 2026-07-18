@@ -1,0 +1,430 @@
+openapi: 3.1.2
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: Link Metrics API
+  summary: The shared HTTP authority for every Link Metrics Contender.
+  description: |
+    A small URL-shortening service used to compare complete backend stacks.
+    JSON request bodies must be no larger than 4 KiB and use
+    `application/json`, optionally with the `charset=utf-8` parameter.
+  version: 1.0.0
+
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Report Contender readiness
+      description: |
+        Returns 204 only after the listener accepts requests, PostgreSQL can be
+        queried, and the applied migration version matches the Contender's
+        expected version. This operation is excluded from performance scoring.
+      security: []
+      responses:
+        "204":
+          description: The Contender is ready.
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/auth/register:
+    post:
+      operationId: registerUser
+      summary: Register a User
+      description: Canonicalizes the email to lowercase before storage.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Credentials"
+      responses:
+        "201":
+          description: The User was registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/auth/login:
+    post:
+      operationId: loginUser
+      summary: Authenticate a User
+      description: |
+        Returns a 15-minute HS256 JWT with `sub`, `iss`, `aud`, `iat`, and
+        `exp` claims as defined by the API Contract.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Credentials"
+      responses:
+        "200":
+          description: Authentication succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/links:
+    post:
+      operationId: createShortLink
+      summary: Create a Short Link
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateShortLinkRequest"
+      responses:
+        "201":
+          description: The Short Link was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShortLinkResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /{shortCode}:
+    get:
+      operationId: resolveShortLink
+      summary: Resolve a Short Link
+      description: |
+        Atomically records the Click before returning the destination. Only a
+        302 temporary redirect is permitted for successful resolution.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ShortCodePath"
+      responses:
+        "302":
+          description: The Click was committed and the Short Link was resolved.
+          headers:
+            Location:
+              required: true
+              description: The destination URL, byte-for-byte as submitted.
+              schema:
+                $ref: "#/components/schemas/DestinationUrl"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/links/{shortCode}/stats:
+    get:
+      operationId: getShortLinkStats
+      summary: Read owned Short Link statistics
+      description: Missing and non-owned Short Links return the same 404 response.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ShortCodePath"
+      responses:
+        "200":
+          description: Statistics for the owned Short Link.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShortLinkStatsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: A Link Metrics HS256 bearer token returned by login.
+
+  parameters:
+    ShortCodePath:
+      name: shortCode
+      in: path
+      required: true
+      description: The exact eight-character Base62 Short Code.
+      schema:
+        $ref: "#/components/schemas/ShortCode"
+
+  responses:
+    BadRequest:
+      description: The JSON is malformed or the request fails validation.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/InvalidJsonError"
+              - $ref: "#/components/schemas/InvalidRequestError"
+    Conflict:
+      description: The canonical email already identifies a User.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConflictError"
+    Unauthorized:
+      description: Credentials or the bearer token are missing or invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UnauthorizedError"
+    NotFound:
+      description: The Short Link is missing or is not owned by the authenticated User.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/NotFoundError"
+    PayloadTooLarge:
+      description: The request body exceeds 4 KiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PayloadTooLargeError"
+    UnsupportedMediaType:
+      description: Content-Type is missing or is not application/json with optional UTF-8 charset.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UnsupportedMediaTypeError"
+    Unavailable:
+      description: PostgreSQL, its pool, or the Contender is unavailable within the prescribed timeout.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UnavailableError"
+
+  schemas:
+    Email:
+      type: string
+      maxLength: 254
+      pattern: "^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
+      description: An ASCII email without surrounding whitespace; stored and looked up lowercase.
+      examples:
+        - user@example.com
+    Password:
+      type: string
+      minLength: 8
+      maxLength: 128
+      pattern: "^[ -~]{8,128}$"
+      writeOnly: true
+      description: Printable ASCII, preserved without trimming or normalization.
+      examples:
+        - benchmark-password
+    Uuid:
+      type: string
+      format: uuid
+      examples:
+        - 0197f96c-b278-7f64-a32f-dae3cabe1ff0
+    ShortCode:
+      type: string
+      minLength: 8
+      maxLength: 8
+      pattern: "^[0-9A-Za-z]{8}$"
+      examples:
+        - 0000000a
+    DestinationUrl:
+      type: string
+      minLength: 1
+      maxLength: 2048
+      pattern: "^https?://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\\[[0-9A-Fa-f:.]+\\])(?::[0-9]{1,5})?(?:[/?#][\\x21-\\x7E]*)?$"
+      description: |
+        An absolute ASCII HTTP or HTTPS URL with a host and no userinfo. Ports,
+        paths, queries, fragments, IPv4, and bracketed IPv6 are allowed. The
+        accepted value is neither normalized nor checked for reachability.
+      examples:
+        - https://example.com/a/path?source=benchmark#result
+    ApiTimestamp:
+      type: string
+      format: date-time
+      pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+      description: An RFC 3339 UTC timestamp with exactly millisecond precision.
+      examples:
+        - 2026-07-18T12:34:56.789Z
+
+    Credentials:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          $ref: "#/components/schemas/Email"
+        password:
+          $ref: "#/components/schemas/Password"
+    CreateShortLinkRequest:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url:
+          $ref: "#/components/schemas/DestinationUrl"
+    UserResponse:
+      type: object
+      additionalProperties: false
+      required: [id, email, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        email:
+          $ref: "#/components/schemas/Email"
+        createdAt:
+          $ref: "#/components/schemas/ApiTimestamp"
+    TokenResponse:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 1
+          description: A 15-minute HS256 JWT.
+    ShortLinkResponse:
+      type: object
+      additionalProperties: false
+      required: [userId, shortCode, originalUrl, createdAt]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        shortCode:
+          $ref: "#/components/schemas/ShortCode"
+        originalUrl:
+          $ref: "#/components/schemas/DestinationUrl"
+        createdAt:
+          $ref: "#/components/schemas/ApiTimestamp"
+    ShortLinkStatsResponse:
+      type: object
+      additionalProperties: false
+      required: [shortCode, originalUrl, clickCount, lastClickedAt]
+      properties:
+        shortCode:
+          $ref: "#/components/schemas/ShortCode"
+        originalUrl:
+          $ref: "#/components/schemas/DestinationUrl"
+        clickCount:
+          type: integer
+          format: int64
+          minimum: 0
+        lastClickedAt:
+          anyOf:
+            - $ref: "#/components/schemas/ApiTimestamp"
+            - type: "null"
+
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required: [field, code]
+      properties:
+        field:
+          type: string
+          enum: [body, email, password, url]
+        code:
+          type: string
+          enum: [invalid, required, unknown]
+      description: Details are sorted by field when present.
+    InvalidRequestError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          const: invalid_request
+        details:
+          type: array
+          items:
+            $ref: "#/components/schemas/ErrorDetail"
+    InvalidJsonError:
+      $ref: "#/components/schemas/InvalidJsonErrorObject"
+    InvalidJsonErrorObject:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          const: invalid_json
+    ConflictError:
+      $ref: "#/components/schemas/ConflictErrorObject"
+    ConflictErrorObject:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          const: conflict
+    UnauthorizedError:
+      $ref: "#/components/schemas/UnauthorizedErrorObject"
+    UnauthorizedErrorObject:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          const: unauthorized
+    NotFoundError:
+      $ref: "#/components/schemas/NotFoundErrorObject"
+    NotFoundErrorObject:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          const: not_found
+    PayloadTooLargeError:
+      $ref: "#/components/schemas/PayloadTooLargeErrorObject"
+    PayloadTooLargeErrorObject:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          const: payload_too_large
+    UnsupportedMediaTypeError:
+      $ref: "#/components/schemas/UnsupportedMediaTypeErrorObject"
+    UnsupportedMediaTypeErrorObject:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          const: unsupported_media_type
+    UnavailableError:
+      $ref: "#/components/schemas/UnavailableErrorObject"
+    UnavailableErrorObject:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          const: unavailable

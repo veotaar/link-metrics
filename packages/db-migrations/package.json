@@ -1,9 +1,0 @@
-{
-  "name": "db-migrations",
-  "version": "0.0.1",
-  "private": true,
-  "scripts": {
-    "migrate:up": "dbmate --env-file .env up",
-    "migrate:down": "dbmate --env-file .env down"
-  }
-}
