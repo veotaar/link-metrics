@@ -1,0 +1,43 @@
+"""Command interface for the Link Metrics benchmark control plane."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from link_metrics.contenders import ContenderDiscoveryError, discover_contenders
+from link_metrics.contract import ContractLintError, lint_contract
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="link-metrics")
+    groups = parser.add_subparsers(dest="group", required=True)
+    contenders = groups.add_parser("contenders", help="operate on Contender manifests")
+    contender_commands = contenders.add_subparsers(dest="command", required=True)
+    discover = contender_commands.add_parser("discover", help="discover local Contenders")
+    discover.add_argument("--root", type=Path, default=Path.cwd())
+
+    contract = groups.add_parser("contract", help="operate on the API Contract")
+    contract_commands = contract.add_subparsers(dest="command", required=True)
+    lint = contract_commands.add_parser("lint", help="lint the OpenAPI authority")
+    default_document = Path(__file__).resolve().parents[3] / "contracts" / "http" / "openapi.yaml"
+    lint.add_argument("--document", type=Path, default=default_document)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+
+    try:
+        if args.group == "contenders":
+            output = discover_contenders(args.root.resolve())
+        else:
+            output = lint_contract(args.document.resolve())
+    except (ContenderDiscoveryError, ContractLintError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    print(json.dumps(output, indent=2, sort_keys=True))
+    return 0

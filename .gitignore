@@ -4,6 +4,12 @@
 node_modules
 .pnp
 .pnp.js
+.venv
+
+# Python
+__pycache__
+*.py[cod]
+.pytest_cache
 
 # Local env files
 .env

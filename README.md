@@ -1,159 +1,60 @@
-# Turborepo starter
+# Link Metrics
 
-This Turborepo starter is maintained by the Turborepo core team.
+Link Metrics is a local-first benchmark of complete, production-plausible backend stacks. Every **Contender** implements the same URL-shortening **API Contract**, uses the same PostgreSQL authority, and is measured against the same versioned **Benchmark Dataset** and protocol.
 
-## Using this example
+The project reports each **Scenario** separately. It does not turn Node.js, Bun, Express, Elysia, or any other component into a synthetic overall winner.
 
-Run the following command:
+## Authority seams
 
-```sh
-npx create-turbo@latest
+The repository has three independently testable authority seams:
+
+1. `contracts/http/openapi.yaml` is the sole human-authored HTTP authority. A Contender is observed as an opaque container through this API Contract.
+2. `database/migrations/` is the sole human-authored database authority. `database/schema.sql` is a generated review snapshot of a freshly migrated PostgreSQL catalog.
+3. `benchmark/` is the locked Python control plane. Its command interface discovers Contenders and will own conformance, orchestration, Dataset reset, and result bundles.
+
+Reusable JavaScript and TypeScript code belongs in `packages/`. Deployable stacks belong in `backends/`, regardless of language. Turborepo only orchestrates directories that are actual pnpm packages; the language-neutral authorities keep their native tooling.
+
+## Repository map
+
+```text
+backends/       deployable Contenders and their local manifests
+benchmark/      Python control plane, protocol, Dataset, and tests
+contracts/http/ versioned OpenAPI 3.1.2 API Contract
+database/       dbmate migrations and generated schema snapshot
+packages/       reusable JavaScript/TypeScript packages and configuration
 ```
 
-## What's inside?
+## Get started
 
-This Turborepo includes the following packages/apps:
-
-### Apps and Packages
-
-- `docs`: a [Next.js](https://nextjs.org/) app
-- `web`: another [Next.js](https://nextjs.org/) app
-- `@repo/ui`: a stub React component library shared by both `web` and `docs` applications
-- `@repo/eslint-config`: `eslint` configurations (includes `eslint-config-next` and `eslint-config-prettier`)
-- `@repo/typescript-config`: `tsconfig.json`s used throughout the monorepo
-
-Each package/app is 100% [TypeScript](https://www.typescriptlang.org/).
-
-### Utilities
-
-This Turborepo has some additional tools already setup for you:
-
-- [TypeScript](https://www.typescriptlang.org/) for static type checking
-- [ESLint](https://eslint.org/) for code linting
-- [Prettier](https://prettier.io) for code formatting
-
-### Build
-
-To build all apps and packages, run the following command:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
+Install JavaScript tooling and run its existing quality commands:
 
 ```sh
-cd my-turborepo
-turbo build
+pnpm install --frozen-lockfile
+pnpm lint
+pnpm format
+pnpm check-types
 ```
 
-Without global `turbo`, use your package manager:
+Install the Python control plane reproducibly and exercise its public command seam:
 
 ```sh
-cd my-turborepo
-npx turbo build
-pnpm dlx turbo build
-pnpm exec turbo build
+cd benchmark
+uv sync --locked
+uv run link-metrics contenders discover --root ..
+uv run link-metrics contract lint
+uv run pytest
 ```
 
-You can build a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
+The discovery command validates every `backends/<id>/contender.yaml` against `benchmark/schemas/contender.schema.json`. Stable identity, pinned language/runtime/framework versions, container settings, port, worker topology, resource profile, and API Contract version are required. Invalid, unknown, directory-mismatched, or duplicate identities fail with a diagnostic naming the manifest.
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
+## Versions
 
-```sh
-turbo build --filter=docs
-```
+The initial comparability identifiers are independent:
 
-Without global `turbo`:
+- API Contract: `1.0.0` in `contracts/http/openapi.yaml`
+- benchmark protocol: `1.0.0` in `benchmark/protocol/VERSION`
+- Benchmark Dataset: `1.0.0` in `benchmark/dataset/VERSION`
 
-```sh
-npx turbo build --filter=docs
-pnpm exec turbo build --filter=docs
-pnpm exec turbo build --filter=docs
-```
+A **Result Series** may compare results only when its API Contract version, protocol version, Benchmark Dataset version, and environment fingerprint all match exactly.
 
-### Develop
-
-To develop all apps and packages, run the following command:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo dev
-```
-
-Without global `turbo`, use your package manager:
-
-```sh
-cd my-turborepo
-npx turbo dev
-pnpm exec turbo dev
-pnpm exec turbo dev
-```
-
-You can develop a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo dev --filter=web
-```
-
-Without global `turbo`:
-
-```sh
-npx turbo dev --filter=web
-pnpm exec turbo dev --filter=web
-pnpm exec turbo dev --filter=web
-```
-
-### Remote Caching
-
-> [!TIP]
-> Vercel Remote Cache is free for all plans. Get started today at [vercel.com](https://vercel.com/signup?utm_source=remote-cache-sdk&utm_campaign=free_remote_cache).
-
-Turborepo can use a technique known as [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching) to share cache artifacts across machines, enabling you to share build caches with your team and CI/CD pipelines.
-
-By default, Turborepo will cache locally. To enable Remote Caching you will need an account with Vercel. If you don't have an account you can [create one](https://vercel.com/signup?utm_source=turborepo-examples), then enter the following commands:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo login
-```
-
-Without global `turbo`, use your package manager:
-
-```sh
-cd my-turborepo
-npx turbo login
-pnpm exec turbo login
-pnpm exec turbo login
-```
-
-This will authenticate the Turborepo CLI with your [Vercel account](https://vercel.com/docs/concepts/personal-accounts/overview).
-
-Next, you can link your Turborepo to your Remote Cache by running the following command from the root of your Turborepo:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo link
-```
-
-Without global `turbo`:
-
-```sh
-npx turbo link
-pnpm exec turbo link
-pnpm exec turbo link
-```
-
-## Useful Links
-
-Learn more about the power of Turborepo:
-
-- [Tasks](https://turborepo.dev/docs/crafting-your-repository/running-tasks)
-- [Caching](https://turborepo.dev/docs/crafting-your-repository/caching)
-- [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching)
-- [Filtering](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters)
-- [Configuration Options](https://turborepo.dev/docs/reference/configuration)
-- [CLI Usage](https://turborepo.dev/docs/reference/command-line-reference)
+See [CONTEXT.md](CONTEXT.md) for the normative project vocabulary and [docs/adr](docs/adr) for accepted design decisions.
