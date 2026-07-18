@@ -1,0 +1,3 @@
+# Author the HTTP contract only in OpenAPI
+
+OpenAPI is the sole human-authored authority for paths, methods, status codes, headers, payload shapes, validation constraints, and security requirements. The contract uses semantic versions: behavior or measured-work changes increment major and start a new result series, compatible additions increment minor, and non-behavioral corrections increment patch; contender manifests and result bundles record the exact version. Generated DTOs, validators, clients, and route interfaces are disposable derivatives rather than competing authorities; benchmark workloads and operational measurement rules live in a separate benchmark protocol because they are not HTTP wire behavior.

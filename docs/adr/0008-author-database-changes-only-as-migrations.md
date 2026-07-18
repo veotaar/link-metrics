@@ -1,0 +1,3 @@
+# Author database changes only as dbmate migrations
+
+Dbmate migration files are the sole human-authored authority for database structure and become immutable after merge or use in a versioned Benchmark Dataset; corrections are appended as new migrations. Applying them produces the runtime PostgreSQL catalog, `schema.sql` is a generated committed snapshot, and any introspected or generated language bindings are disposable derivatives that are never edited by hand; contenders and their ORMs must not create or migrate database objects. Schema changes regenerate the snapshot and bindings, rebuild the template database, and increment the Dataset version.

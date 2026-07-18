@@ -1,0 +1,3 @@
+# Generate short codes in PostgreSQL
+
+PostgreSQL generates each short code deterministically from a database sequence using the ordered Base62 alphabet `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz`, left-padding with `0` to exactly eight characters; every contender creates Short Links through the same insert-and-return path. Centralizing generation guarantees uniqueness without retries and makes database work identical across contenders, deliberately excluding application-level identifier generation from the comparison while accepting that sequential creation order may be observable.

@@ -1,0 +1,3 @@
+# Define maximum sustainable throughput
+
+For each scenario, maximum sustainable throughput is the highest offered request rate at which all five Trials, throughout their measured intervals, complete at least 99% of scheduled requests, produce fewer than 0.1% unexpected responses or transport failures, keep p99 latency within the scenario's predefined budget, and avoid the instability flag. The p99 budget is 1,000 ms for registration and login, whose fixed Argon2 work is intentionally expensive, and 250 ms for Short Link creation, resolution, and statistics lookup. Requiring five repeatable passes with completion, correctness, and bounded latency prevents queues, fast failures, or favorable outliers from being counted as useful capacity.

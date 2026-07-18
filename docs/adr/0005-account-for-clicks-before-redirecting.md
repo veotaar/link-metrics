@@ -1,0 +1,3 @@
+# Account for clicks before redirecting
+
+Every successful Short Link resolution synchronously commits one atomic database update that increments `click_count BIGINT NOT NULL DEFAULT 0 CHECK (click_count >= 0)` and sets nullable `last_clicked_at TIMESTAMPTZ` with PostgreSQL `clock_timestamp()` before returning `302 Found`; if accounting fails, the request does not redirect. Evaluating the clock as the row update executes avoids recording a pre-lock-wait statement time under viral contention, and application clocks never participate. This deliberately favors exact statistics and equivalent database work across contenders over a cache-optimized redirect path, making the benchmark representative of a write-heavy URL shortener.

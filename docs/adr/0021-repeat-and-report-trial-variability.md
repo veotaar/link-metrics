@@ -1,0 +1,3 @@
+# Repeat and report trial variability
+
+Every measured Scenario and offered-rate combination requires five independent Trials with the Benchmark Dataset restored each time and contender order randomized. Five published PRNG seeds map to the repetition indices and produce identical User, token, Short Code, validation-sampling, and access-distribution sequences for every contender; seeds change only with the Dataset version and are recorded in result bundles. Reports publish all samples, summarize them with the median and a 95% bootstrap confidence interval, and flag a result as unstable when its coefficient of variation exceeds 5%, rather than hiding runtime or host variance in an average.

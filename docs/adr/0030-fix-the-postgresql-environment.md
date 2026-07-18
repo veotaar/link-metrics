@@ -1,0 +1,3 @@
+# Fix the PostgreSQL environment
+
+Primary results use PostgreSQL 18.4 from a pinned container digest and one committed configuration with durability and autovacuum enabled. The sole extension is `pg_prewarm`, invoked explicitly by the control plane after Dataset cloning without its background worker; contenders cannot access extension-specific behavior, install other extensions, or tune PostgreSQL independently. `pg_stat_statements` is disabled to exclude its tracking overhead. All non-default settings are versioned in the environment fingerprint, while database-tuning experiments belong to a separately reported future benchmark family.

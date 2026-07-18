@@ -1,0 +1,3 @@
+# Standardize JWT authentication
+
+All contenders issue and validate 15-minute HS256 bearer tokens using one fixed, committed, clearly labeled benchmark-only 32-byte key that is also used for reference-token generation and conformance and must never serve as an operational secret. Tokens carry an `HS256` algorithm and `JWT` type header plus `sub` (user UUID), `iss` (`link-metrics`), `aud` (`link-metrics-api`), `iat`, and `exp`; protected operations validate the signature, allowed algorithm, issuer, audience, expiration, and UUID-shaped subject, with no refresh tokens or token persistence. This fixes equivalent cryptographic inputs and validation work while preserving broad library support across languages.
