@@ -16,6 +16,7 @@ class ContenderDiscoveryError(Exception):
 
 def discover_contenders(root: Path) -> list[dict[str, Any]]:
     """Return validated Contender manifests in stable identity order."""
+    root = root.resolve()
     schema_path = Path(__file__).resolve().parents[2] / "schemas" / "contender.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     validator = Draft202012Validator(schema)
@@ -33,6 +34,19 @@ def discover_contenders(root: Path) -> list[dict[str, Any]]:
             error = errors[0]
             field = ".".join(str(part) for part in error.absolute_path) or "manifest"
             raise ContenderDiscoveryError(f"{relative_path}: {field}: {error.message}")
+
+        context_path = (manifest_path.parent / manifest["container"]["context"]).resolve()
+        if not context_path.is_relative_to(root) or not context_path.is_dir():
+            raise ContenderDiscoveryError(
+                f"{relative_path}: container.context: directory does not exist inside the "
+                f"repository: {manifest['container']['context']}"
+            )
+        dockerfile_path = (context_path / manifest["container"]["dockerfile"]).resolve()
+        if not dockerfile_path.is_relative_to(context_path) or not dockerfile_path.is_file():
+            raise ContenderDiscoveryError(
+                f"{relative_path}: container.dockerfile: file does not exist inside the build "
+                f"context: {manifest['container']['dockerfile']}"
+            )
 
         contenders.append({**manifest, "manifest": relative_path.as_posix()})
 

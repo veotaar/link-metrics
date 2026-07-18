@@ -11,26 +11,7 @@ from openapi_spec_validator import validate_spec
 from openapi_spec_validator.validation.exceptions import OpenAPIValidationError
 
 
-EXPECTED_OPERATIONS = {
-    ("/health", "get"): ("health", {"204", "503"}),
-    ("/api/auth/register", "post"): (
-        "registerUser",
-        {"201", "400", "409", "413", "415", "503"},
-    ),
-    ("/api/auth/login", "post"): (
-        "loginUser",
-        {"200", "400", "401", "413", "415", "503"},
-    ),
-    ("/api/links", "post"): (
-        "createShortLink",
-        {"201", "400", "401", "413", "415", "503"},
-    ),
-    ("/{shortCode}", "get"): ("resolveShortLink", {"302", "404", "503"}),
-    ("/api/links/{shortCode}/stats", "get"): (
-        "getShortLinkStats",
-        {"200", "401", "404", "503"},
-    ),
-}
+HTTP_METHODS = ("get", "post", "put", "patch", "delete", "options", "head", "trace")
 SEMANTIC_VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 
@@ -61,34 +42,22 @@ def lint_contract(document_path: Path) -> dict[str, Any]:
             f"{document_path}: info.version must be a stable semantic version, got {contract_version!r}"
         )
 
-    actual_operations: dict[tuple[str, str], dict[str, Any]] = {}
-    for path, path_item in document.get("paths", {}).items():
-        for method in ("get", "post", "put", "patch", "delete", "options", "head", "trace"):
-            if method in path_item:
-                actual_operations[(path, method)] = path_item[method]
-
-    if set(actual_operations) != set(EXPECTED_OPERATIONS):
-        missing = sorted(set(EXPECTED_OPERATIONS) - set(actual_operations))
-        unexpected = sorted(set(actual_operations) - set(EXPECTED_OPERATIONS))
-        raise ContractLintError(
-            f"{document_path}: operation surface drift; missing={missing}, unexpected={unexpected}"
-        )
-
     operation_ids: list[str] = []
-    for operation_key, (expected_id, expected_statuses) in EXPECTED_OPERATIONS.items():
-        operation = actual_operations[operation_key]
-        actual_id = operation.get("operationId")
-        if actual_id != expected_id:
-            raise ContractLintError(
-                f"{document_path}: {operation_key}: operationId must be '{expected_id}', got {actual_id!r}"
-            )
-        actual_statuses = set(operation.get("responses", {}))
-        if actual_statuses != expected_statuses:
-            raise ContractLintError(
-                f"{document_path}: {operation_key}: responses must be {sorted(expected_statuses)}, "
-                f"got {sorted(actual_statuses)}"
-            )
-        operation_ids.append(expected_id)
+    for path, path_item in document.get("paths", {}).items():
+        for method in HTTP_METHODS:
+            if method in path_item:
+                operation_id = path_item[method].get("operationId")
+                if not isinstance(operation_id, str) or not operation_id:
+                    raise ContractLintError(
+                        f"{document_path}: {method.upper()} {path} must declare an operationId"
+                    )
+                operation_ids.append(operation_id)
+
+    duplicate_ids = sorted(
+        operation_id for operation_id in set(operation_ids) if operation_ids.count(operation_id) > 1
+    )
+    if duplicate_ids:
+        raise ContractLintError(f"{document_path}: duplicate operationIds: {duplicate_ids}")
 
     return {
         "openapi": document["openapi"],

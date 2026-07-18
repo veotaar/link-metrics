@@ -45,7 +45,7 @@ uv run link-metrics contract lint
 uv run pytest
 ```
 
-The discovery command validates every `backends/<id>/contender.yaml` against `benchmark/schemas/contender.schema.json`. Stable identity, pinned language/runtime/framework versions, container settings, port, worker topology, resource profile, and API Contract version are required. Invalid, unknown, directory-mismatched, or duplicate identities fail with a diagnostic naming the manifest.
+The discovery command validates every `backends/<id>/contender.yaml` against `benchmark/schemas/contender.schema.json`. Stable identity, pinned language/runtime/framework versions, an existing container build context and Dockerfile, port, worker topology, resource profile, and API Contract version are required. Invalid, unknown, directory-mismatched, or duplicate identities fail with a diagnostic naming the manifest. An incomplete backend skeleton becomes discoverable only when its container seam exists.
 
 ## Versions
 

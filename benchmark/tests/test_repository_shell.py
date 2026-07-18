@@ -37,6 +37,4 @@ def test_repository_exposes_versioned_authority_seams_and_local_contenders() -> 
     )
 
     assert result.returncode == 0, result.stderr
-    contenders = json.loads(result.stdout)
-    assert [contender["id"] for contender in contenders] == ["elysia-bun", "express-node"]
-    assert all(contender["apiContractVersion"] == "1.0.0" for contender in contenders)
+    assert json.loads(result.stdout) == []
