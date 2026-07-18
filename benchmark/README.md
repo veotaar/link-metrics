@@ -9,6 +9,6 @@ uv run link-metrics contract lint
 uv run pytest
 ```
 
-`contenders discover` scans `backends/*/contender.yaml`, validates each document against `schemas/contender.schema.json`, rejects duplicate identities, and emits deterministic JSON. `contract lint` performs OpenAPI validation and pins the accepted versioned six-operation surface.
+`contenders discover` scans `backends/*/contender.yaml`, validates each document against `schemas/contender.schema.json`, rejects duplicate identities, and emits deterministic JSON. `contract lint` validates the OpenAPI 3.1.2 document, its semantic version, and unique operation identifiers; the API Contract itself remains the sole authority for its operation surface.
 
 The lockfile is committed. Change dependencies with `uv add` or `uv remove`, and verify installation with `uv sync --locked`.

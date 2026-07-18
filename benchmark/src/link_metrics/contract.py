@@ -16,7 +16,7 @@ SEMANTIC_VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]
 
 
 class ContractLintError(Exception):
-    """The API Contract is invalid or has drifted from the minimal surface."""
+    """The API Contract is invalid or violates a contract-tooling invariant."""
 
 
 def lint_contract(document_path: Path) -> dict[str, Any]:
