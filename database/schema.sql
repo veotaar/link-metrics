@@ -29,6 +29,46 @@ CREATE EXTENSION IF NOT EXISTS pg_prewarm WITH SCHEMA pg_catalog;
 COMMENT ON EXTENSION pg_prewarm IS 'prewarm relation data';
 
 
+--
+-- Name: short_code_from_sequence(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.short_code_from_sequence(sequence_value bigint) RETURNS character varying
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$
+    WITH RECURSIVE digits (remaining, encoded) AS (
+        VALUES (sequence_value, ''::TEXT)
+
+        UNION ALL
+
+        SELECT
+            remaining / 62,
+            substr(
+                '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
+                (remaining % 62)::INTEGER + 1,
+                1
+            ) || encoded
+        FROM digits
+        WHERE remaining > 0
+    )
+    SELECT lpad(encoded, 8, '0')
+    FROM digits
+    WHERE remaining = 0
+$$;
+
+
+--
+-- Name: links_short_code_sequence; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.links_short_code_sequence
+    START WITH 1
+    INCREMENT BY 1
+    MINVALUE 0
+    MAXVALUE 218340105584895
+    CACHE 1;
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -38,11 +78,14 @@ SET default_table_access_method = heap;
 --
 
 CREATE TABLE public.links (
-    short_code character varying(10) NOT NULL,
+    short_code character varying(8) DEFAULT (public.short_code_from_sequence(nextval('public.links_short_code_sequence'::regclass)) COLLATE "C") NOT NULL,
     original_url text NOT NULL,
     click_count integer DEFAULT 0 NOT NULL,
     user_id uuid NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT links_click_count_is_nonnegative CHECK ((click_count >= 0)),
+    CONSTRAINT links_original_url_is_valid CHECK ((((octet_length(original_url) >= 1) AND (octet_length(original_url) <= 2048)) AND ((original_url COLLATE "C") ~ '^https?://([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?([/?#][!-~]*)?$'::text))),
+    CONSTRAINT links_short_code_is_canonical CHECK (((octet_length((short_code)::text) = 8) AND (((short_code)::text COLLATE "C") ~ '^[0-9A-Za-z]{8}$'::text)))
 );
 
 
@@ -127,4 +170,5 @@ ALTER TABLE ONLY public.links
 
 INSERT INTO public.schema_migrations (version) VALUES
     ('20260604222601'),
-    ('20260719000100');
+    ('20260719000100'),
+    ('20260719000200');

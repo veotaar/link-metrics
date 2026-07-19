@@ -1,7 +1,8 @@
-import { pgTable, uniqueIndex, check, uuid, varchar, timestamp, index, foreignKey, text, integer } from "drizzle-orm/pg-core"
+import { pgTable, uniqueIndex, check, uuid, varchar, timestamp, index, foreignKey, text, integer, pgSequence } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
 
+export const linksShortCodeSequence = pgSequence("links_short_code_sequence", {  startWith: "1", increment: "1", minValue: "0", maxValue: "218340105584895", cache: "1", cycle: false })
 
 export const users = pgTable("users", {
 	id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
@@ -14,7 +15,7 @@ export const users = pgTable("users", {
 ]);
 
 export const links = pgTable("links", {
-	shortCode: varchar("short_code", { length: 10 }).primaryKey().notNull(),
+	shortCode: varchar("short_code", { length: 8 }).default(sql`(short_code_from_sequence(nextval(\'links_short_code_sequence\'::regclass)) COLLATE "C")`).primaryKey().notNull(),
 	originalUrl: text("original_url").notNull(),
 	clickCount: integer("click_count").default(0).notNull(),
 	userId: uuid("user_id").notNull(),
@@ -26,6 +27,9 @@ export const links = pgTable("links", {
 			foreignColumns: [users.id],
 			name: "links_user_id_fkey"
 		}).onDelete("cascade"),
+	check("links_short_code_is_canonical", sql`(octet_length((short_code)::text) = 8) AND (((short_code)::text COLLATE "C") ~ '^[0-9A-Za-z]{8}$'::text)`),
+	check("links_original_url_is_valid", sql`((octet_length(original_url) >= 1) AND (octet_length(original_url) <= 2048)) AND ((original_url COLLATE "C") ~ '^https?://([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?([/?#][!-~]*)?$'::text)`),
+	check("links_click_count_is_nonnegative", sql`click_count >= 0`),
 ]);
 
 export const schemaMigrations = pgTable("schema_migrations", {

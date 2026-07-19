@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import re
 import subprocess
 import sys
 import time
@@ -131,6 +132,23 @@ def login_user(contender_url: str, email: str, password: str) -> tuple[int, byte
     )
 
 
+def create_short_link(
+    contender_url: str,
+    token: str,
+    body: bytes,
+) -> tuple[int, bytes, str]:
+    return request_api(
+        contender_url,
+        "POST",
+        "/api/links",
+        body=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+
+
 def decode_jwt_part(part: str) -> dict:
     return json.loads(base64.urlsafe_b64decode(part + ("=" * (-len(part) % 4))))
 
@@ -171,6 +189,260 @@ def running_contender() -> Iterator[dict]:
     finally:
         stopped = run_control_plane("contenders", "stop", CONTENDER_ID)
         assert stopped.returncode == 0, stopped.stderr
+
+
+def test_short_link_creation_returns_owned_deterministic_short_links() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        users = []
+        for index in range(2):
+            email = f"owner-{index}@example.com"
+            registration = register_user(
+                contender_url,
+                json.dumps(
+                    {"email": email, "password": "benchmark-password"},
+                    separators=(",", ":"),
+                ).encode(),
+            )
+            login = login_user(contender_url, email, "benchmark-password")
+            assert registration[0] == 201
+            assert login[0] == 200
+            users.append((json.loads(registration[1]), json.loads(login[1])["token"]))
+
+        destinations = [
+            "https://Example.COM/a%2Fb?source=Benchmark#Result",
+            "http://127.0.0.1:8080/path",
+        ]
+        responses = [
+            create_short_link(
+                contender_url,
+                token,
+                json.dumps({"url": destination}, separators=(",", ":")).encode(),
+            )
+            for (_, token), destination in zip(users, destinations, strict=True)
+        ]
+
+        assert [(response[0], response[2]) for response in responses] == [
+            (201, "application/json"),
+            (201, "application/json"),
+        ]
+        short_links = [json.loads(response[1]) for response in responses]
+        assert [short_link["shortCode"] for short_link in short_links] == [
+            "00000001",
+            "00000002",
+        ]
+        for short_link, (user, _), destination in zip(
+            short_links, users, destinations, strict=True
+        ):
+            assert set(short_link) == {"userId", "shortCode", "originalUrl", "createdAt"}
+            assert short_link["userId"] == user["id"]
+            assert short_link["originalUrl"] == destination
+            assert re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z",
+                short_link["createdAt"],
+            )
+            assert datetime.fromisoformat(short_link["createdAt"]).isoformat(
+                timespec="milliseconds"
+            ).endswith("+00:00")
+
+
+def test_short_link_creation_requires_authentication_before_body_processing() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        missing = request_api(contender_url, "POST", "/api/links")
+        invalid = request_api(
+            contender_url,
+            "POST",
+            "/api/links",
+            headers={"Authorization": "Bearer not-a-token"},
+        )
+
+        assert missing == (401, b'{"error":"unauthorized"}', "application/json")
+        assert invalid == missing
+
+
+def test_short_link_creation_enforces_the_destination_contract() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        registration = register_user(
+            contender_url,
+            b'{"email":"url-owner@example.com","password":"benchmark-password"}',
+        )
+        login = login_user(contender_url, "url-owner@example.com", "benchmark-password")
+        assert registration[0] == 201
+        assert login[0] == 200
+        token = json.loads(login[1])["token"]
+
+        maximum_prefix = "https://example.com/"
+        maximum_destination = maximum_prefix + ("a" * (2_048 - len(maximum_prefix)))
+        accepted_destinations = ["http://a", maximum_destination]
+        accepted = [
+            create_short_link(
+                contender_url,
+                token,
+                json.dumps({"url": destination}, separators=(",", ":")).encode(),
+            )
+            for destination in accepted_destinations
+        ]
+
+        invalid_destinations = [
+            "ftp://example.com",
+            "https://user@example.com/path",
+            "https:///missing-host",
+            maximum_destination + "a",
+            "https://example.com/non-ascii-é",
+            "https://example.com/path with-space",
+        ]
+        rejected = [
+            create_short_link(
+                contender_url,
+                token,
+                json.dumps({"url": destination}, separators=(",", ":")).encode(),
+            )
+            for destination in invalid_destinations
+        ]
+        unknown = create_short_link(
+            contender_url,
+            token,
+            b'{"url":"https://example.com","customCode":"not-allowed"}',
+        )
+        missing = create_short_link(contender_url, token, b"{}")
+
+        assert [response[0] for response in accepted] == [201, 201]
+        assert [json.loads(response[1])["originalUrl"] for response in accepted] == (
+            accepted_destinations
+        )
+        assert rejected == [
+            (
+                400,
+                b'{"error":"invalid_request","details":[{"field":"url","code":"invalid"}]}',
+                "application/json",
+            )
+        ] * len(invalid_destinations)
+        assert unknown == (
+            400,
+            b'{"error":"invalid_request","details":[{"field":"body","code":"unknown"}]}',
+            "application/json",
+        )
+        assert missing == (
+            400,
+            b'{"error":"invalid_request","details":[{"field":"url","code":"required"}]}',
+            "application/json",
+        )
+
+
+def test_short_link_constraints_match_the_api_destination_boundary() -> None:
+    with running_contender() as state:
+        database_container = state["database"]["container"]
+        inserted_user = run_psql(
+            database_container,
+            "INSERT INTO public.users (email, password_hash) "
+            "VALUES ('database-owner@example.com', 'unused-hash') RETURNING id",
+        )
+        assert inserted_user.returncode == 0, inserted_user.stderr
+        user_id = inserted_user.stdout.splitlines()[0]
+
+        accepted = run_psql(
+            database_container,
+            "INSERT INTO public.links (original_url, user_id) "
+            f"VALUES ('http://a', '{user_id}') "
+            "RETURNING short_code, original_url",
+        )
+        assert accepted.returncode == 0, accepted.stderr
+        assert accepted.stdout.splitlines()[0] == "00000001|http://a"
+
+        maximum = run_psql(
+            database_container,
+            "INSERT INTO public.links (short_code, original_url, user_id) "
+            f"VALUES ('0000000D', 'https://example.com/' || repeat('a', 2028), '{user_id}') "
+            "RETURNING short_code, octet_length(original_url)",
+        )
+        assert maximum.returncode == 0, maximum.stderr
+        assert maximum.stdout.splitlines()[0] == "0000000D|2048"
+
+        alphabet = run_psql(
+            database_container,
+            "SELECT string_agg(public.short_code_from_sequence(value), ',' ORDER BY value) "
+            "FROM unnest(ARRAY[0, 9, 10, 35, 36, 61, 62, 3843, 3844, "
+            "218340105584895]::bigint[]) AS value",
+        )
+        assert alphabet.returncode == 0, alphabet.stderr
+        assert alphabet.stdout.strip() == (
+            "00000000,00000009,0000000A,0000000Z,0000000a,0000000z,"
+            "00000010,000000zz,00000100,zzzzzzzz"
+        )
+
+        rejected_statements = [
+            "INSERT INTO public.links (short_code, original_url, user_id) "
+            f"VALUES ('0000000!', 'https://example.com', '{user_id}')",
+            "INSERT INTO public.links (short_code, original_url, user_id) "
+            f"VALUES ('000000D', 'https://example.com', '{user_id}')",
+            "INSERT INTO public.links (short_code, original_url, user_id) "
+            f"VALUES ('0000000A', 'ftp://example.com', '{user_id}')",
+            "INSERT INTO public.links (short_code, original_url, user_id) "
+            f"VALUES ('0000000B', 'https://user@example.com', '{user_id}')",
+            "INSERT INTO public.links (short_code, original_url, user_id) "
+            f"VALUES ('0000000E', 'https://a/' || repeat('a', 2039), '{user_id}')",
+            "INSERT INTO public.links (short_code, original_url, user_id) "
+            f"VALUES ('0000000F', 'https:///missing-host', '{user_id}')",
+            "INSERT INTO public.links (short_code, original_url, user_id) "
+            f"VALUES ('0000000G', 'https://example.com/non-ascii-é', '{user_id}')",
+            "INSERT INTO public.links (short_code, original_url, user_id) "
+            f"VALUES ('0000000H', 'https://example.com/path with-space', '{user_id}')",
+            "INSERT INTO public.links (short_code, original_url, user_id, click_count) "
+            f"VALUES ('0000000C', 'https://example.com', '{user_id}', -1)",
+        ]
+        rejected = [run_psql(database_container, statement) for statement in rejected_statements]
+        assert all(result.returncode != 0 for result in rejected)
+
+
+def test_short_link_creation_uses_one_autocommit_read_committed_statement() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        database_container = state["database"]["container"]
+        registration = register_user(
+            contender_url,
+            b'{"email":"link-statement@example.com","password":"benchmark-password"}',
+        )
+        login = login_user(contender_url, "link-statement@example.com", "benchmark-password")
+        assert registration[0] == 201
+        assert login[0] == 200
+
+        isolation = run_psql(database_container, "SHOW default_transaction_isolation")
+        logging = run_psql(database_container, "ALTER SYSTEM SET log_statement = 'all'")
+        reloaded = run_psql(database_container, "SELECT pg_reload_conf()")
+        disconnected = run_psql(
+            database_container,
+            "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+            "WHERE usename = 'link_metrics_contender'",
+        )
+        assert isolation.returncode == 0, isolation.stderr
+        assert isolation.stdout.strip() == "read committed"
+        assert logging.returncode == 0, logging.stderr
+        assert reloaded.returncode == 0, reloaded.stderr
+        assert disconnected.returncode == 0, disconnected.stderr
+
+        logs_before = read_container_logs(database_container)
+        response = create_short_link(
+            contender_url,
+            json.loads(login[1])["token"],
+            b'{"url":"https://example.com/one-statement"}',
+        )
+        logs_after = read_container_logs(database_container)
+
+        assert response[0] == 201
+        assert logs_after.startswith(logs_before)
+        request_logs = logs_after[len(logs_before) :]
+        statement_lines = [
+            line
+            for line in request_logs.splitlines()
+            if "statement:" in line or "execute <unnamed>:" in line
+        ]
+        assert len(statement_lines) == 1, request_logs
+        assert 'insert into "links"' in request_logs
+        assert "returning" in request_logs
+        assert "statement: BEGIN" not in request_logs
+        assert "statement: COMMIT" not in request_logs
 
 
 def test_login_returns_the_standard_jwt_through_the_container_seam() -> None:
@@ -706,7 +978,7 @@ def test_control_plane_manages_the_express_contender_through_its_container_seam(
         assert started.returncode == 0, started.stderr
         start_state = json.loads(started.stdout)
         assert start_state["database"]["status"] == "running"
-        assert start_state["database"]["migrationVersion"] == "20260719000100"
+        assert start_state["database"]["migrationVersion"] == "20260719000200"
         assert isinstance(start_state["database"]["port"], int)
         assert start_state["contender"]["id"] == CONTENDER_ID
         assert start_state["contender"]["status"] == "running"
@@ -751,7 +1023,7 @@ def test_database_role_and_extension_boundaries_are_mechanically_enforced() -> N
             contender_role=True,
         )
         assert migration_read.returncode == 0, migration_read.stderr
-        assert migration_read.stdout.strip() == "20260719000100"
+        assert migration_read.stdout.strip() == "20260719000200"
 
         database_address = subprocess.run(
             [
@@ -839,14 +1111,14 @@ def test_readiness_reports_migration_drift_and_database_loss() -> None:
         drift = run_psql(
             database_container,
             "UPDATE public.schema_migrations SET version = 'unexpected' "
-            "WHERE version = '20260719000100'",
+            "WHERE version = '20260719000200'",
         )
         assert drift.returncode == 0, drift.stderr
         assert read_health(url) == (503, b'{"error":"unavailable"}', "application/json")
 
         restored = run_psql(
             database_container,
-            "UPDATE public.schema_migrations SET version = '20260719000100' "
+            "UPDATE public.schema_migrations SET version = '20260719000200' "
             "WHERE version = 'unexpected'",
         )
         assert restored.returncode == 0, restored.stderr

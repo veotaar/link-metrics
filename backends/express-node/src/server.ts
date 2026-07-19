@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 import type { ErrorRequestHandler, Request, RequestHandler, Response } from "express";
+import { links } from "../drizzle/schema.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const expectedMigrationVersion = process.env.EXPECTED_MIGRATION_VERSION;
@@ -44,21 +45,35 @@ function postgresErrorCode(error: unknown): string | undefined {
 type Credentials = { email: string; password: string };
 type ErrorDetail = {
   code: "invalid" | "required" | "unknown";
-  field: "body" | "email" | "password";
+  field: "body" | "email" | "password" | "url";
 };
 
 const emailPattern =
   /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 const passwordPattern = /^[\x20-\x7e]{8,128}$/;
+const destinationPattern =
+  /^https?:\/\/(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?(?:[/?#][\x21-\x7e]*)?$/;
+
+function requestRecord(body: unknown): Record<string, unknown> | undefined {
+  return typeof body === "object" && body !== null && !Array.isArray(body)
+    ? (body as Record<string, unknown>)
+    : undefined;
+}
+
+function sortedErrorDetails(details: ErrorDetail[]): ErrorDetail[] {
+  return details.sort((left, right) =>
+    left.field < right.field ? -1 : left.field > right.field ? 1 : 0,
+  );
+}
 
 function validateCredentials(
   body: unknown,
 ): { details: ErrorDetail[] } | { credentials: Credentials } {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+  const record = requestRecord(body);
+  if (!record) {
     return { details: [{ field: "body", code: "invalid" }] };
   }
 
-  const record = body as Record<string, unknown>;
   const details: ErrorDetail[] = [];
   if (Object.keys(record).some((field) => field !== "email" && field !== "password")) {
     details.push({ field: "body", code: "unknown" });
@@ -81,12 +96,35 @@ function validateCredentials(
   }
 
   if (details.length > 0) {
-    details.sort((left, right) =>
-      left.field < right.field ? -1 : left.field > right.field ? 1 : 0,
-    );
-    return { details };
+    return { details: sortedErrorDetails(details) };
   }
   return { credentials: record as Credentials };
+}
+
+function validateShortLink(body: unknown): { details: ErrorDetail[] } | { destination: string } {
+  const record = requestRecord(body);
+  if (!record) {
+    return { details: [{ field: "body", code: "invalid" }] };
+  }
+
+  const details: ErrorDetail[] = [];
+  if (Object.keys(record).some((field) => field !== "url")) {
+    details.push({ field: "body", code: "unknown" });
+  }
+  if (!Object.hasOwn(record, "url")) {
+    details.push({ field: "url", code: "required" });
+  } else if (
+    typeof record.url !== "string" ||
+    record.url.length > 2_048 ||
+    !destinationPattern.test(record.url)
+  ) {
+    details.push({ field: "url", code: "invalid" });
+  }
+
+  if (details.length > 0) {
+    return { details: sortedErrorDetails(details) };
+  }
+  return { destination: record.url as string };
 }
 
 async function verifyPassword(password: string, encodedHash: string): Promise<boolean> {
@@ -231,13 +269,13 @@ const requireJsonContentType: RequestHandler = (request, response, next) => {
   next();
 };
 
-const parseCredentialsJson = express.json({
+const parseJsonBody = express.json({
   limit: 4_096,
   strict: false,
   type: () => true,
 });
 
-const handleCredentialsJsonError: ErrorRequestHandler = (error, _request, response, next) => {
+const handleJsonBodyError: ErrorRequestHandler = (error, _request, response, next) => {
   const errorType =
     typeof error === "object" && error !== null && "type" in error ? error.type : undefined;
   if (errorType === "entity.too.large") {
@@ -254,10 +292,50 @@ const handleCredentialsJsonError: ErrorRequestHandler = (error, _request, respon
 app.disable("x-powered-by");
 app.use("/api/links", authenticateBearer);
 app.post(
+  "/api/links",
+  requireJsonContentType,
+  parseJsonBody,
+  handleJsonBodyError,
+  async (request: Request, response: Response) => {
+    const validation = validateShortLink(request.body);
+    if ("details" in validation) {
+      response.status(400).json({ error: "invalid_request", details: validation.details });
+      return;
+    }
+
+    try {
+      const shortLinks = await database
+        .insert(links)
+        .values({
+          originalUrl: validation.destination,
+          userId: response.locals.userId as string,
+        })
+        .returning({
+          userId: links.userId,
+          shortCode: links.shortCode,
+          originalUrl: links.originalUrl,
+          createdAt: sql<string>`to_char(
+            ${links.createdAt} AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+          )`,
+        });
+      const shortLink = shortLinks[0];
+      if (!shortLink) {
+        response.status(503).json({ error: "unavailable" });
+        return;
+      }
+
+      response.status(201).json(shortLink);
+    } catch {
+      response.status(503).json({ error: "unavailable" });
+    }
+  },
+);
+app.post(
   "/api/auth/login",
   requireJsonContentType,
-  parseCredentialsJson,
-  handleCredentialsJsonError,
+  parseJsonBody,
+  handleJsonBodyError,
   async (request: Request, response: Response) => {
     const validation = validateCredentials(request.body);
     if ("details" in validation) {
@@ -287,8 +365,8 @@ app.post(
 app.post(
   "/api/auth/register",
   requireJsonContentType,
-  parseCredentialsJson,
-  handleCredentialsJsonError,
+  parseJsonBody,
+  handleJsonBodyError,
   async (request: Request, response: Response) => {
     const validation = validateCredentials(request.body);
     if ("details" in validation) {

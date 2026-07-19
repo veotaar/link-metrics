@@ -4,7 +4,7 @@
   "private": true,
   "description": "Express on Node.js Contender for Link Metrics",
   "type": "module",
-  "main": "dist/server.js",
+  "main": "dist/src/server.js",
   "scripts": {
     "build": "tsc --project tsconfig.json",
     "check-types": "tsc --project tsconfig.json --noEmit",

@@ -7,6 +7,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY tsconfig.json ./
+COPY drizzle/schema.ts ./drizzle/schema.ts
 COPY src ./src
 RUN pnpm build && pnpm prune --prod
 
@@ -20,4 +21,4 @@ COPY --from=build --chown=node:node /app/dist ./dist
 
 USER node
 EXPOSE 3000
-CMD ["node", "dist/server.js"]
+CMD ["node", "dist/src/server.js"]
