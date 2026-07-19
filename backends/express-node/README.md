@@ -1,8 +1,9 @@
 # Express on Node.js Contender
 
 This Contender is discovered from `contender.yaml` and built through its isolated OCI
-context. The current vertical slice implements `GET /health` and
-`POST /api/auth/register`.
+context. The current vertical slice implements `GET /health`, `POST /api/auth/register`,
+and `POST /api/auth/login`, plus bearer authentication for the protected API Contract
+paths.
 
 Readiness returns `204` after the PostgreSQL pool can read the expected dbmate migration
 version. A connection failure, pool timeout, query timeout, or migration mismatch returns
@@ -14,6 +15,12 @@ password with Node.js Argon2id v1.3 using the benchmark's fixed 64 MiB, three-it
 four-lane profile. It persists the canonical email and encoded hash through one
 autocommit insert-and-return statement. Canonical email shape and uniqueness are also
 enforced by PostgreSQL.
+
+Login performs one canonical User lookup, verifies the stored Argon2id hash, and returns
+a 15-minute HS256 JWT. Issuance and protected-request validation use the fixed 32-byte
+key in `benchmark/fixtures/jwt-hs256.key`. That key is a public, reproducible benchmark
+fixture and must never be used as an operational secret. The Contender does not issue
+refresh tokens or persist or cache bearer tokens.
 
 The container requires `DATABASE_URL`, `EXPECTED_MIGRATION_VERSION`, and `PORT`. The
 control plane supplies these inputs; the Contender neither applies migrations nor owns

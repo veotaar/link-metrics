@@ -1,5 +1,5 @@
 import express from "express";
-import { argon2, randomBytes } from "node:crypto";
+import { argon2, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
@@ -8,6 +8,10 @@ import type { ErrorRequestHandler, Request, RequestHandler, Response } from "exp
 const databaseUrl = process.env.DATABASE_URL;
 const expectedMigrationVersion = process.env.EXPECTED_MIGRATION_VERSION;
 const port = Number(process.env.PORT ?? "3000");
+
+// Public benchmark fixture from benchmark/fixtures/jwt-hs256.key. This fixed key
+// is reproducible test input, not an operational secret.
+const publicBenchmarkJwtKey = Buffer.from("PUBLIC-LINK-METRICS-JWT-KEY-v1!!", "ascii");
 
 if (!databaseUrl || !expectedMigrationVersion || !Number.isInteger(port)) {
   throw new Error("DATABASE_URL, EXPECTED_MIGRATION_VERSION, and a valid PORT are required");
@@ -85,6 +89,136 @@ function validateCredentials(
   return { credentials: record as Credentials };
 }
 
+async function verifyPassword(password: string, encodedHash: string): Promise<boolean> {
+  const match = /^\$argon2id\$v=19\$m=65536,t=3,p=4\$([A-Za-z0-9+/]+)\$([A-Za-z0-9+/]+)$/.exec(
+    encodedHash,
+  );
+  if (!match) {
+    return false;
+  }
+
+  const nonce = Buffer.from(match[1]!, "base64");
+  const expectedTag = Buffer.from(match[2]!, "base64");
+  if (nonce.length !== 16 || expectedTag.length !== 32) {
+    return false;
+  }
+
+  const actualTag = await new Promise<Buffer>((resolve, reject) => {
+    argon2(
+      "argon2id",
+      {
+        memory: 65_536,
+        message: Buffer.from(password, "ascii"),
+        nonce,
+        parallelism: 4,
+        passes: 3,
+        tagLength: 32,
+      },
+      (error, derivedKey) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(derivedKey);
+      },
+    );
+  });
+  return timingSafeEqual(actualTag, expectedTag);
+}
+
+function issueToken(userId: string): string {
+  const issuedAt = Math.floor(Date.now() / 1_000);
+  const encodedHeader = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString(
+    "base64url",
+  );
+  const encodedClaims = Buffer.from(
+    JSON.stringify({
+      sub: userId,
+      iss: "link-metrics",
+      aud: "link-metrics-api",
+      iat: issuedAt,
+      exp: issuedAt + 900,
+    }),
+  ).toString("base64url");
+  const signingInput = `${encodedHeader}.${encodedClaims}`;
+  const signature = createHmac("sha256", publicBenchmarkJwtKey)
+    .update(signingInput)
+    .digest("base64url");
+  return `${signingInput}.${signature}`;
+}
+
+function decodeJwtObject(encoded: string): Record<string, unknown> | undefined {
+  try {
+    const bytes = Buffer.from(encoded, "base64url");
+    if (bytes.toString("base64url") !== encoded) {
+      return undefined;
+    }
+    const value: unknown = JSON.parse(bytes.toString("utf8"));
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return undefined;
+    }
+    return value as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+function authenticatedSubject(token: string): string | undefined {
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    return undefined;
+  }
+  const [encodedHeader, encodedClaims, encodedSignature] = parts;
+  if (!encodedHeader || !encodedClaims || !encodedSignature) {
+    return undefined;
+  }
+
+  const header = decodeJwtObject(encodedHeader);
+  const claims = decodeJwtObject(encodedClaims);
+  if (header?.alg !== "HS256" || header.typ !== "JWT" || !claims) {
+    return undefined;
+  }
+
+  const signature = Buffer.from(encodedSignature, "base64url");
+  if (signature.toString("base64url") !== encodedSignature || signature.length !== 32) {
+    return undefined;
+  }
+  const expectedSignature = createHmac("sha256", publicBenchmarkJwtKey)
+    .update(`${encodedHeader}.${encodedClaims}`)
+    .digest();
+  if (!timingSafeEqual(signature, expectedSignature)) {
+    return undefined;
+  }
+
+  const now = Math.floor(Date.now() / 1_000);
+  if (
+    claims.iss !== "link-metrics" ||
+    claims.aud !== "link-metrics-api" ||
+    typeof claims.iat !== "number" ||
+    !Number.isInteger(claims.iat) ||
+    typeof claims.exp !== "number" ||
+    !Number.isInteger(claims.exp) ||
+    claims.exp <= now ||
+    typeof claims.sub !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(claims.sub)
+  ) {
+    return undefined;
+  }
+  return claims.sub;
+}
+
+const authenticateBearer: RequestHandler = (request, response, next) => {
+  const authorization = request.headers.authorization;
+  const match = typeof authorization === "string" ? /^Bearer ([^\s]+)$/i.exec(authorization) : null;
+  const subject = match ? authenticatedSubject(match[1]!) : undefined;
+  if (!subject) {
+    response.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  response.locals.userId = subject;
+  next();
+};
+
 const requireJsonContentType: RequestHandler = (request, response, next) => {
   const contentType = request.headers["content-type"];
   const accepted =
@@ -97,13 +231,13 @@ const requireJsonContentType: RequestHandler = (request, response, next) => {
   next();
 };
 
-const parseRegistrationJson = express.json({
+const parseCredentialsJson = express.json({
   limit: 4_096,
   strict: false,
   type: () => true,
 });
 
-const handleRegistrationJsonError: ErrorRequestHandler = (error, _request, response, next) => {
+const handleCredentialsJsonError: ErrorRequestHandler = (error, _request, response, next) => {
   const errorType =
     typeof error === "object" && error !== null && "type" in error ? error.type : undefined;
   if (errorType === "entity.too.large") {
@@ -118,11 +252,43 @@ const handleRegistrationJsonError: ErrorRequestHandler = (error, _request, respo
 };
 
 app.disable("x-powered-by");
+app.use("/api/links", authenticateBearer);
+app.post(
+  "/api/auth/login",
+  requireJsonContentType,
+  parseCredentialsJson,
+  handleCredentialsJsonError,
+  async (request: Request, response: Response) => {
+    const validation = validateCredentials(request.body);
+    if ("details" in validation) {
+      response.status(400).json({ error: "invalid_request", details: validation.details });
+      return;
+    }
+
+    try {
+      const result = await database.execute<{ id: string; password_hash: string }>(sql`
+        SELECT id, password_hash
+        FROM users
+        WHERE email = ${validation.credentials.email.toLowerCase()}
+        LIMIT 1
+      `);
+      const user = result.rows[0];
+      if (!user || !(await verifyPassword(validation.credentials.password, user.password_hash))) {
+        response.status(401).json({ error: "unauthorized" });
+        return;
+      }
+
+      response.status(200).json({ token: issueToken(user.id) });
+    } catch {
+      response.status(503).json({ error: "unavailable" });
+    }
+  },
+);
 app.post(
   "/api/auth/register",
   requireJsonContentType,
-  parseRegistrationJson,
-  handleRegistrationJsonError,
+  parseCredentialsJson,
+  handleCredentialsJsonError,
   async (request: Request, response: Response) => {
     const validation = validateCredentials(request.body);
     if ("details" in validation) {

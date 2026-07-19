@@ -1,7 +1,11 @@
+import base64
+import hashlib
+import hmac
 import http.client
 import json
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -14,6 +18,10 @@ from urllib.parse import urlsplit
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CONTENDER_ID = "express-node"
+PUBLIC_BENCHMARK_JWT_KEY = (
+    REPOSITORY_ROOT / "benchmark" / "fixtures" / "jwt-hs256.key"
+).read_bytes().strip()
+assert len(PUBLIC_BENCHMARK_JWT_KEY) == 32
 
 
 def run_control_plane(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -73,24 +81,83 @@ def read_health(url: str) -> tuple[int, bytes, str]:
 
 
 def register_user(
-    health_url: str,
+    contender_url: str,
     body: bytes,
     *,
     content_type: str | None = "application/json",
 ) -> tuple[int, bytes, str]:
-    parsed_url = urlsplit(health_url)
     headers = {} if content_type is None else {"Content-Type": content_type}
+    return request_api(
+        contender_url,
+        "POST",
+        "/api/auth/register",
+        body=body,
+        headers=headers,
+    )
+
+
+def request_api(
+    contender_url: str,
+    method: str,
+    path: str,
+    *,
+    body: bytes = b"",
+    headers: dict[str, str] | None = None,
+) -> tuple[int, bytes, str]:
+    parsed_url = urlsplit(contender_url)
     connection = http.client.HTTPConnection(
         parsed_url.hostname,
         parsed_url.port,
         timeout=10,
     )
     try:
-        connection.request("POST", "/api/auth/register", body=body, headers=headers)
+        connection.request(method, path, body=body, headers=headers or {})
         response = connection.getresponse()
         return response.status, response.read(), response.headers.get_content_type()
     finally:
         connection.close()
+
+
+def login_user(contender_url: str, email: str, password: str) -> tuple[int, bytes, str]:
+    return request_api(
+        contender_url,
+        "POST",
+        "/api/auth/login",
+        body=json.dumps(
+            {"email": email, "password": password},
+            separators=(",", ":"),
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+
+
+def decode_jwt_part(part: str) -> dict:
+    return json.loads(base64.urlsafe_b64decode(part + ("=" * (-len(part) % 4))))
+
+
+def encode_jwt(
+    claims: dict,
+    *,
+    header: dict | None = None,
+    signature_algorithm: str = "sha256",
+    alter_signature: bool = False,
+) -> str:
+    encoded_header = base64.urlsafe_b64encode(
+        json.dumps(
+            header if header is not None else {"alg": "HS256", "typ": "JWT"},
+            separators=(",", ":"),
+        ).encode()
+    ).rstrip(b"=")
+    encoded_claims = base64.urlsafe_b64encode(
+        json.dumps(claims, separators=(",", ":")).encode()
+    ).rstrip(b"=")
+    signing_input = encoded_header + b"." + encoded_claims
+    signature = hmac.new(PUBLIC_BENCHMARK_JWT_KEY, signing_input, signature_algorithm).digest()
+    if alter_signature:
+        signature = bytes([signature[0] ^ 1]) + signature[1:]
+    return b".".join(
+        [encoded_header, encoded_claims, base64.urlsafe_b64encode(signature).rstrip(b"=")]
+    ).decode()
 
 
 @contextmanager
@@ -104,6 +171,289 @@ def running_contender() -> Iterator[dict]:
     finally:
         stopped = run_control_plane("contenders", "stop", CONTENDER_ID)
         assert stopped.returncode == 0, stopped.stderr
+
+
+def test_login_returns_the_standard_jwt_through_the_container_seam() -> None:
+    with running_contender() as state:
+        health_url = state["contender"]["url"]
+        registration_status, registration_body, _ = register_user(
+            health_url,
+            b'{"email":"Login@Example.com","password":"benchmark-password"}',
+        )
+        issued_after = int(time.time())
+        status, body, content_type = login_user(
+            health_url,
+            "LOGIN@EXAMPLE.COM",
+            "benchmark-password",
+        )
+        issued_before = int(time.time())
+
+        assert registration_status == 201
+        assert (status, content_type) == (200, "application/json")
+        response = json.loads(body)
+        assert set(response) == {"token"}
+
+        encoded_header, encoded_claims, encoded_signature = response["token"].split(".")
+        header = decode_jwt_part(encoded_header)
+        claims = decode_jwt_part(encoded_claims)
+        expected_signature = hmac.new(
+            PUBLIC_BENCHMARK_JWT_KEY,
+            f"{encoded_header}.{encoded_claims}".encode(),
+            hashlib.sha256,
+        ).digest()
+
+        assert header == {"alg": "HS256", "typ": "JWT"}
+        assert set(claims) == {"sub", "iss", "aud", "iat", "exp"}
+        assert claims["sub"] == json.loads(registration_body)["id"]
+        assert uuid.UUID(claims["sub"]).version == 7
+        assert claims["iss"] == "link-metrics"
+        assert claims["aud"] == "link-metrics-api"
+        assert type(claims["iat"]) is int
+        assert issued_after <= claims["iat"] <= issued_before
+        assert claims["exp"] == claims["iat"] + 900
+        assert hmac.compare_digest(
+            base64.urlsafe_b64decode(encoded_signature + ("=" * (-len(encoded_signature) % 4))),
+            expected_signature,
+        )
+
+
+def test_protected_authentication_accepts_only_the_standard_jwt_profile() -> None:
+    issued_at = int(time.time())
+    valid_claims = {
+        "sub": "0197f96c-b278-7f64-a32f-dae3cabe1ff0",
+        "iss": "link-metrics",
+        "aud": "link-metrics-api",
+        "iat": issued_at,
+        "exp": issued_at + 900,
+    }
+    invalid_tokens = [
+        encode_jwt(valid_claims, alter_signature=True),
+        encode_jwt(
+            valid_claims,
+            header={"alg": "HS384", "typ": "JWT"},
+            signature_algorithm="sha384",
+        ),
+        encode_jwt(valid_claims, header={"alg": "HS256", "typ": "not-JWT"}),
+        encode_jwt({**valid_claims, "iss": "another-issuer"}),
+        encode_jwt({**valid_claims, "aud": "another-audience"}),
+        encode_jwt({**valid_claims, "exp": issued_at - 1}),
+        encode_jwt({**valid_claims, "sub": "not-a-uuid"}),
+    ]
+
+    with running_contender() as state:
+        health_url = state["contender"]["url"]
+        valid_response = request_api(
+            health_url,
+            "GET",
+            "/api/links/00000000/stats",
+            headers={"Authorization": f"Bearer {encode_jwt(valid_claims)}"},
+        )
+        invalid_responses = [
+            request_api(
+                health_url,
+                "GET",
+                "/api/links/00000000/stats",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            for token in invalid_tokens
+        ]
+
+        assert valid_response[0] != 401
+        assert invalid_responses == [
+            (401, b'{"error":"unauthorized"}', "application/json")
+        ] * len(invalid_tokens)
+
+
+def test_login_rejects_wrong_email_and_password_identically() -> None:
+    with running_contender() as state:
+        health_url = state["contender"]["url"]
+        registration = register_user(
+            health_url,
+            b'{"email":"credentials@example.com","password":"correct-password"}',
+        )
+        wrong_email = login_user(
+            health_url,
+            "missing@example.com",
+            "correct-password",
+        )
+        wrong_password = login_user(
+            health_url,
+            "credentials@example.com",
+            "wrong-password",
+        )
+
+        assert registration[0] == 201
+        assert wrong_email == (401, b'{"error":"unauthorized"}', "application/json")
+        assert wrong_password == wrong_email
+
+
+def test_login_verifies_an_independently_generated_standard_argon2id_hash() -> None:
+    # Generated with argon2-cffi's reference-backed low-level API using the exact
+    # profile in ADR 0006 and the fixed 16-byte salt "0123456789abcdef".
+    independent_hash = (
+        "$argon2id$v=19$m=65536,t=3,p=4$MDEyMzQ1Njc4OWFiY2RlZg$"
+        "eNFKE0ewrRxVJsC3Al3ZHiMQnqW0GlreWeIe3OFGzmQ"
+    )
+
+    with running_contender() as state:
+        database_container = state["database"]["container"]
+        inserted = run_psql(
+            database_container,
+            "INSERT INTO public.users (email, password_hash) VALUES "
+            f"('independent-hash@example.com', '{independent_hash}')",
+        )
+        response = login_user(
+            state["contender"]["url"],
+            "independent-hash@example.com",
+            "independent-password",
+        )
+
+        assert inserted.returncode == 0, inserted.stderr
+        assert response[0] == 200
+
+
+def test_login_uses_one_autocommit_read_committed_lookup() -> None:
+    with running_contender() as state:
+        health_url = state["contender"]["url"]
+        database_container = state["database"]["container"]
+        registration = register_user(
+            health_url,
+            b'{"email":"login-statement@example.com","password":"benchmark-password"}',
+        )
+        assert registration[0] == 201
+
+        isolation = run_psql(database_container, "SHOW default_transaction_isolation")
+        logging = run_psql(database_container, "ALTER SYSTEM SET log_statement = 'all'")
+        reloaded = run_psql(database_container, "SELECT pg_reload_conf()")
+        assert isolation.returncode == 0, isolation.stderr
+        assert isolation.stdout.strip() == "read committed"
+        assert logging.returncode == 0, logging.stderr
+        assert reloaded.returncode == 0, reloaded.stderr
+
+        logs_before = read_container_logs(database_container)
+        response = login_user(
+            health_url,
+            "LOGIN-STATEMENT@EXAMPLE.COM",
+            "benchmark-password",
+        )
+        logs_after = read_container_logs(database_container)
+
+        assert response[0] == 200
+        assert logs_after.startswith(logs_before)
+        request_logs = logs_after[len(logs_before) :]
+        statement_lines = [
+            line
+            for line in request_logs.splitlines()
+            if "statement:" in line or "execute <unnamed>:" in line
+        ]
+        assert len(statement_lines) == 1, request_logs
+        assert "SELECT id, password_hash" in request_logs
+        assert "statement: BEGIN" not in request_logs
+        assert "statement: COMMIT" not in request_logs
+
+
+def test_login_pool_and_statement_timeouts_are_unavailable_without_retry() -> None:
+    with running_contender() as state:
+        health_url = state["contender"]["url"]
+        database_container = state["database"]["container"]
+        registration = register_user(
+            health_url,
+            b'{"email":"timeout-login@example.com","password":"benchmark-password"}',
+        )
+        assert registration[0] == 201
+
+        logging = run_psql(database_container, "ALTER SYSTEM SET log_statement = 'all'")
+        reloaded = run_psql(database_container, "SELECT pg_reload_conf()")
+        assert logging.returncode == 0, logging.stderr
+        assert reloaded.returncode == 0, reloaded.stderr
+
+        lock_process = subprocess.Popen(
+            [
+                "docker",
+                "exec",
+                database_container,
+                "psql",
+                "--host",
+                "127.0.0.1",
+                "--username",
+                "link_metrics_control",
+                "--dbname",
+                "link_metrics",
+                "--command",
+                "BEGIN; LOCK TABLE public.users IN ACCESS EXCLUSIVE MODE; "
+                "SELECT pg_sleep(5); COMMIT;",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        lock_deadline = time.monotonic() + 2
+        while time.monotonic() < lock_deadline:
+            lock_state = run_psql(
+                database_container,
+                "SELECT count(*) FROM pg_catalog.pg_locks "
+                "WHERE relation = 'public.users'::regclass "
+                "AND mode = 'AccessExclusiveLock' AND granted",
+            )
+            if lock_state.returncode == 0 and lock_state.stdout.strip() == "1":
+                break
+            time.sleep(0.05)
+        else:
+            lock_process.terminate()
+            raise AssertionError("failed to acquire the users table lock")
+
+        logs_before = read_container_logs(database_container)
+        statement_started = time.monotonic()
+        statement_timeout = login_user(
+            health_url,
+            "timeout-login@example.com",
+            "benchmark-password",
+        )
+        statement_elapsed = time.monotonic() - statement_started
+        lock_stdout, lock_stderr = lock_process.communicate(timeout=10)
+        assert lock_process.returncode == 0, lock_stdout + lock_stderr
+        logs_after = read_container_logs(database_container)
+
+        assert statement_timeout == (503, b'{"error":"unavailable"}', "application/json")
+        assert 1.5 <= statement_elapsed < 3.5
+        assert logs_after.startswith(logs_before)
+        request_logs = logs_after[len(logs_before) :]
+        assert request_logs.count("SELECT id, password_hash") == 1, request_logs
+
+        disconnected = run_psql(
+            database_container,
+            "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+            "WHERE usename = 'link_metrics_contender'",
+        )
+        assert disconnected.returncode == 0, disconnected.stderr
+        time.sleep(0.1)
+
+        paused = subprocess.run(
+            ["docker", "pause", database_container],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert paused.returncode == 0, paused.stderr
+        try:
+            pool_started = time.monotonic()
+            pool_timeout = login_user(
+                health_url,
+                "timeout-login@example.com",
+                "benchmark-password",
+            )
+            pool_elapsed = time.monotonic() - pool_started
+        finally:
+            unpaused = subprocess.run(
+                ["docker", "unpause", database_container],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert unpaused.returncode == 0, unpaused.stderr
+
+        assert pool_timeout == (503, b'{"error":"unavailable"}', "application/json")
+        assert 1.5 <= pool_elapsed < 3.5
 
 
 def test_registration_returns_the_canonical_user_through_the_container_seam() -> None:
