@@ -10,7 +10,7 @@ The repository has three independently testable authority seams:
 
 1. `contracts/http/openapi.yaml` is the sole human-authored HTTP authority. A Contender is observed as an opaque container through this API Contract.
 2. `database/migrations/` is the sole human-authored database authority. `database/schema.sql` is a generated review snapshot of a freshly migrated PostgreSQL catalog.
-3. `benchmark/` is the locked Python control plane. Its command interface discovers Contenders, enforces conformance, and will own orchestration, Dataset reset, and result bundles.
+3. `benchmark/` is the locked Python control plane. Its command interface discovers Contenders, enforces conformance, constructs and resets the Benchmark Dataset, and will own Trial orchestration and result bundles.
 
 Reusable JavaScript and TypeScript code belongs in `packages/`. Deployable stacks belong in `backends/`, regardless of language. Turborepo only orchestrates directories that are actual pnpm packages; the language-neutral authorities keep their native tooling.
 
@@ -42,6 +42,7 @@ cd benchmark
 uv sync --locked
 uv run link-metrics contenders discover --root ..
 uv run link-metrics contenders conform express-node --root ..
+uv run link-metrics dataset describe --root ..
 uv run link-metrics contract lint
 uv run pytest
 ```
@@ -51,6 +52,8 @@ Run the first containerized vertical slice from `benchmark/`:
 ```sh
 uv run link-metrics contenders start express-node --root ..
 uv run link-metrics contenders inspect express-node --root ..
+uv run link-metrics dataset build express-node --root ..
+uv run link-metrics dataset reset express-node --root ..
 uv run link-metrics contenders stop express-node --root ..
 ```
 

@@ -6,6 +6,7 @@ This locked Python project operates Link Metrics through a language-neutral comm
 uv sync --locked
 uv run link-metrics contenders discover --root ..
 uv run link-metrics contenders conform express-node --root ..
+uv run link-metrics dataset describe --root ..
 uv run link-metrics contract lint
 uv run pytest
 ```
@@ -36,6 +37,11 @@ pytest workflows cover exact readiness, identity, authentication, Short Link, Cl
 ownership transitions. Pinned Schemathesis exercises examples, coverage, positive and
 negative fuzzing, response and header checks, and stateful creation-to-statistics sequences
 from OpenAPI 3.1. The Contender remains opaque throughout both gates.
+
+The `dataset` command group publishes deterministic workload samples and fresh reference
+tokens, builds the expensive immutable PostgreSQL template separately from Trials, and
+resets the fixed Trial database by verified clone plus explicit buffer prewarming. See
+[`dataset/README.md`](dataset/README.md) for the lifecycle and provenance commands.
 
 `contenders discover` scans `backends/*/contender.yaml`, validates each document against `schemas/contender.schema.json`, rejects duplicate identities, and emits deterministic JSON. `contract lint` validates the OpenAPI 3.1.2 document, its semantic version, and unique operation identifiers; the API Contract itself remains the sole authority for its operation surface.
 

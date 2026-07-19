@@ -1,0 +1,27 @@
+{
+  "argon2id": {
+    "hashLength": 32,
+    "memoryKiB": 65536,
+    "parallelism": 4,
+    "saltLength": 16,
+    "timeCost": 3,
+    "version": 19
+  },
+  "benchmarkPassword": "link-metrics-benchmark-only",
+  "prng": "sha256-counter-v1",
+  "referenceTokenUsers": 10000,
+  "repetitionSeeds": [
+    1350403001542084573, 16626817107421360574, 1288854886252412864, 16145191919997344020,
+    12322208812885659100
+  ],
+  "saltSeed": "083f465a3788b3c734346368d60ef16bc351eb197ae42035c52601f9bba138bd",
+  "samplingStreams": ["users", "tokens", "shortCodes", "validation", "access"],
+  "shortLinks": {
+    "clickedPerUser": 5,
+    "neverClickedPerUser": 5,
+    "perUser": 10,
+    "total": 1000000
+  },
+  "users": 100000,
+  "version": "1.2.0"
+}
