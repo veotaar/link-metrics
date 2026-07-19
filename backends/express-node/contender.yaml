@@ -1,0 +1,21 @@
+schemaVersion: 1
+id: express-node
+displayName: Express on Node.js
+apiContractVersion: 1.0.0
+language:
+  name: TypeScript
+  version: 7.0.2
+runtime:
+  name: Node.js
+  version: 26.2.0
+framework:
+  name: Express
+  version: 5.2.1
+container:
+  context: .
+  dockerfile: Dockerfile
+port: 3000
+workers:
+  model: single-process
+  count: 1
+resourceProfile: local-7800x3d

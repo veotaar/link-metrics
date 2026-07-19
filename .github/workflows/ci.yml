@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  correctness:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.1
+      - uses: actions/setup-node@v4
+        with:
+          cache: pnpm
+          node-version: 26.2.0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.29
+
+      - run: pnpm install --frozen-lockfile
+      - run: uv sync --locked
+        working-directory: benchmark
+      - name: Install pinned dbmate
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/amacneil/dbmate/releases/download/v2.34.1/dbmate-linux-amd64 \
+            --output dbmate-linux-amd64
+          echo "b002d5249d53d0c6c482ed761b5a806c6fb9a364fcc5f9db3e8763c1d9e40e1d  dbmate-linux-amd64" \
+            | sha256sum --check
+          sudo install dbmate-linux-amd64 /usr/local/bin/dbmate
+
+      - run: pnpm build
+      - run: pnpm check-types
+      - run: pnpm lint
+      - run: uv run pytest
+        working-directory: benchmark
+
+      - name: Check generated Express Drizzle schema
+        run: |
+          state="$(cd benchmark && uv run link-metrics contenders start express-node --root ..)"
+          test "$(jq --raw-output '.database.status' <<<"$state")" = "running"
+          database_url="$(cd benchmark && uv run link-metrics contenders database-url express-node --root .. | jq --raw-output '.url')"
+          DATABASE_URL="$database_url" pnpm --dir backends/express-node db:introspect
+          test -z "$(git status --porcelain -- backends/express-node/drizzle)"
+      - name: Stop generated-schema environment
+        if: always()
+        run: cd benchmark && uv run link-metrics contenders stop express-node --root ..

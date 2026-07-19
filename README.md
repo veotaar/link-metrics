@@ -45,6 +45,17 @@ uv run link-metrics contract lint
 uv run pytest
 ```
 
+Run the first containerized vertical slice from `benchmark/`:
+
+```sh
+uv run link-metrics contenders start express-node --root ..
+uv run link-metrics contenders inspect express-node --root ..
+uv run link-metrics contenders stop express-node --root ..
+```
+
+The control plane treats Express as opaque: it builds from `contender.yaml`, supplies the
+restricted PostgreSQL connection, and observes only the standard `/health` operation.
+
 The discovery command validates every `backends/<id>/contender.yaml` against `benchmark/schemas/contender.schema.json`. Stable identity, pinned language/runtime/framework versions, an existing container build context and Dockerfile, port, worker topology, resource profile, and API Contract version are required. Invalid, unknown, directory-mismatched, or duplicate identities fail with a diagnostic naming the manifest. An incomplete backend skeleton becomes discoverable only when its container seam exists.
 
 ## Versions

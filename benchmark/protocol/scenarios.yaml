@@ -1,0 +1,14 @@
+schemaVersion: 1
+scenarios:
+  - id: registration
+    operationId: registerUser
+  - id: login
+    operationId: loginUser
+  - id: short-link-creation
+    operationId: createShortLink
+  - id: uniform-resolution
+    operationId: resolveShortLink
+  - id: viral-resolution
+    operationId: resolveShortLink
+  - id: statistics
+    operationId: getShortLinkStats

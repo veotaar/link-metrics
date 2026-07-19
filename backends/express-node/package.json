@@ -1,16 +1,25 @@
 {
   "name": "@link-metrics/express-node",
   "version": "1.0.0",
-  "description": "",
-  "keywords": [],
-  "license": "ISC",
-  "author": "",
+  "private": true,
+  "description": "Express on Node.js Contender for Link Metrics",
   "type": "module",
-  "main": "index.js",
+  "main": "dist/server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc --project tsconfig.json",
+    "check-types": "tsc --project tsconfig.json --noEmit",
+    "db:introspect": "drizzle-kit pull --config drizzle.config.ts"
   },
   "dependencies": {
-    "express": "^5.2.1"
+    "drizzle-orm": "^0.45.2",
+    "express": "^5.2.1",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.1",
+    "@types/pg": "^8.20.0",
+    "drizzle-kit": "^0.31.10",
+    "typescript": "^7.0.2"
   }
 }
