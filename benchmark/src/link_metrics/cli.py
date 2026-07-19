@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from link_metrics.contenders import ContenderDiscoveryError, discover_contenders
+from link_metrics.conformance import ConformanceError, conform_contender
 from link_metrics.contract import ContractLintError, lint_contract
 from link_metrics.runtime import (
     ContenderRuntimeError,
@@ -30,6 +31,7 @@ def _parser() -> argparse.ArgumentParser:
         ("inspect", "inspect a running Contender"),
         ("database-url", "print the ephemeral control-plane database URL"),
         ("stop", "stop a Contender and PostgreSQL"),
+        ("conform", "run the mandatory API conformance gate"),
     ):
         runtime = contender_commands.add_parser(command, help=help_text)
         runtime.add_argument("contender_id")
@@ -57,9 +59,16 @@ def main(argv: list[str] | None = None) -> int:
             output = database_owner_connection(args.root.resolve(), args.contender_id)
         elif args.group == "contenders" and args.command == "stop":
             output = stop_contender(args.root.resolve(), args.contender_id)
+        elif args.group == "contenders" and args.command == "conform":
+            output = conform_contender(args.root.resolve(), args.contender_id)
         else:
             output = lint_contract(args.document.resolve())
-    except (ContenderDiscoveryError, ContenderRuntimeError, ContractLintError) as error:
+    except (
+        ConformanceError,
+        ContenderDiscoveryError,
+        ContenderRuntimeError,
+        ContractLintError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 

@@ -43,7 +43,7 @@ def test_repository_exposes_versioned_authority_seams_and_local_contenders() -> 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == [
         {
-            "apiContractVersion": "1.0.0",
+            "apiContractVersion": "1.0.1",
             "container": {"context": ".", "dockerfile": "Dockerfile"},
             "displayName": "Express on Node.js",
             "framework": {"name": "Express", "version": "5.2.1"},

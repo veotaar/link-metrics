@@ -166,12 +166,25 @@ def resolve_short_link(contender_url: str, short_code: str) -> tuple[int, bytes,
         connection.close()
 
 
+def get_short_link_stats(
+    contender_url: str,
+    token: str,
+    short_code: str,
+) -> tuple[int, bytes, str]:
+    return request_api(
+        contender_url,
+        "GET",
+        f"/api/links/{short_code}/stats",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
 def create_short_link_for_new_user(
     contender_url: str,
     *,
     email: str,
     destination: str,
-) -> str:
+) -> tuple[str, str]:
     registration = register_user(
         contender_url,
         json.dumps(
@@ -182,13 +195,14 @@ def create_short_link_for_new_user(
     login = login_user(contender_url, email, "benchmark-password")
     assert registration[0] == 201
     assert login[0] == 200
+    token = json.loads(login[1])["token"]
     creation = create_short_link(
         contender_url,
-        json.loads(login[1])["token"],
+        token,
         json.dumps({"url": destination}, separators=(",", ":")).encode(),
     )
     assert creation[0] == 201
-    return json.loads(creation[1])["shortCode"]
+    return token, json.loads(creation[1])["shortCode"]
 
 
 def decode_jwt_part(part: str) -> dict:
@@ -573,7 +587,7 @@ def test_short_link_resolution_commits_the_first_click_before_redirecting() -> N
         contender_url = state["contender"]["url"]
         database_container = state["database"]["container"]
         destination = "https://Example.COM/a%2Fb?source=Resolution#Result"
-        short_code = create_short_link_for_new_user(
+        _, short_code = create_short_link_for_new_user(
             contender_url,
             email="resolution@example.com",
             destination=destination,
@@ -632,7 +646,7 @@ def test_short_link_resolution_failure_never_redirects_or_changes_analytics() ->
     with running_contender() as state:
         contender_url = state["contender"]["url"]
         database_container = state["database"]["container"]
-        short_code = create_short_link_for_new_user(
+        _, short_code = create_short_link_for_new_user(
             contender_url,
             email="failed-resolution@example.com",
             destination="https://example.com/database-failure",
@@ -659,7 +673,7 @@ def test_short_link_resolution_timeout_never_redirects_or_retries() -> None:
     with running_contender() as state:
         contender_url = state["contender"]["url"]
         database_container = state["database"]["container"]
-        short_code = create_short_link_for_new_user(
+        _, short_code = create_short_link_for_new_user(
             contender_url,
             email="timed-resolution@example.com",
             destination="https://example.com/database-timeout",
@@ -695,7 +709,7 @@ def test_short_link_resolution_uses_one_atomic_autocommit_statement() -> None:
         contender_url = state["contender"]["url"]
         database_container = state["database"]["container"]
         destination = "https://example.com/one-resolution-statement"
-        short_code = create_short_link_for_new_user(
+        _, short_code = create_short_link_for_new_user(
             contender_url,
             email="resolution-statement@example.com",
             destination=destination,
@@ -741,7 +755,7 @@ def test_concurrent_short_link_resolutions_account_for_every_click() -> None:
         contender_url = state["contender"]["url"]
         database_container = state["database"]["container"]
         destination = "https://example.com/viral-resolution"
-        short_code = create_short_link_for_new_user(
+        _, short_code = create_short_link_for_new_user(
             contender_url,
             email="viral-resolution@example.com",
             destination=destination,
@@ -764,6 +778,148 @@ def test_concurrent_short_link_resolutions_account_for_every_click() -> None:
         )
         assert analytics.returncode == 0, analytics.stderr
         assert analytics.stdout.strip() == f"{request_count}|t"
+
+
+def test_short_link_owner_reads_never_clicked_statistics() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        destination = "https://Example.COM/a%2Fb?source=Statistics#Result"
+        token, short_code = create_short_link_for_new_user(
+            contender_url,
+            email="statistics-owner@example.com",
+            destination=destination,
+        )
+
+        statistics = get_short_link_stats(contender_url, token, short_code)
+
+        assert statistics[0] == 200
+        assert statistics[2] == "application/json"
+        assert json.loads(statistics[1]) == {
+            "shortCode": short_code,
+            "originalUrl": destination,
+            "clickCount": 0,
+            "lastClickedAt": None,
+        }
+
+
+def test_short_link_statistics_hide_non_owned_and_missing_codes_identically() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        owner_token, short_code = create_short_link_for_new_user(
+            contender_url,
+            email="stats-owner@example.com",
+            destination="https://example.com/private-statistics",
+        )
+        other_token, _ = create_short_link_for_new_user(
+            contender_url,
+            email="stats-other@example.com",
+            destination="https://example.com/other-statistics",
+        )
+
+        non_owned = get_short_link_stats(contender_url, other_token, short_code)
+        missing = get_short_link_stats(contender_url, owner_token, "zzzzzzzz")
+
+        assert non_owned == (404, b'{"error":"not_found"}', "application/json")
+        assert missing == non_owned
+
+
+def test_short_link_statistics_report_the_exact_click_transition() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        destination = "https://example.com/exact-click-transition"
+        token, short_code = create_short_link_for_new_user(
+            contender_url,
+            email="clicked-stats@example.com",
+            destination=destination,
+        )
+        assert resolve_short_link(contender_url, short_code) == (302, b"", destination)
+        assert resolve_short_link(contender_url, short_code) == (302, b"", destination)
+
+        statistics = get_short_link_stats(contender_url, token, short_code)
+
+        assert statistics[0] == 200
+        body = json.loads(statistics[1])
+        assert body["shortCode"] == short_code
+        assert body["originalUrl"] == destination
+        assert body["clickCount"] == 2
+        assert re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z",
+            body["lastClickedAt"],
+        )
+        assert datetime.fromisoformat(body["lastClickedAt"]).utcoffset().total_seconds() == 0
+
+
+def test_short_link_statistics_use_one_autocommit_read_committed_select() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        database_container = state["database"]["container"]
+        token, short_code = create_short_link_for_new_user(
+            contender_url,
+            email="stats-statement@example.com",
+            destination="https://example.com/one-statistics-statement",
+        )
+
+        isolation = run_psql(database_container, "SHOW default_transaction_isolation")
+        logging = run_psql(database_container, "ALTER SYSTEM SET log_statement = 'all'")
+        reloaded = run_psql(database_container, "SELECT pg_reload_conf()")
+        disconnected = run_psql(
+            database_container,
+            "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+            "WHERE usename = 'link_metrics_contender'",
+        )
+        assert isolation.returncode == 0, isolation.stderr
+        assert isolation.stdout.strip() == "read committed"
+        assert logging.returncode == 0, logging.stderr
+        assert reloaded.returncode == 0, reloaded.stderr
+        assert disconnected.returncode == 0, disconnected.stderr
+
+        logs_before = read_container_logs(database_container)
+        statistics = get_short_link_stats(contender_url, token, short_code)
+        logs_after = read_container_logs(database_container)
+
+        assert statistics[0] == 200
+        assert logs_after.startswith(logs_before)
+        request_logs = logs_after[len(logs_before) :]
+        statement_lines = [
+            line
+            for line in request_logs.splitlines()
+            if "statement:" in line or "execute <unnamed>:" in line
+        ]
+        assert len(statement_lines) == 1, request_logs
+        assert "SELECT" in request_logs
+        assert "FROM links" in request_logs
+        assert "short_code = $1" in request_logs
+        assert "user_id = $2" in request_logs
+        assert "statement: BEGIN" not in request_logs
+        assert "statement: COMMIT" not in request_logs
+
+
+def test_short_link_statistics_timeout_is_unavailable_without_retry() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        database_container = state["database"]["container"]
+        token, short_code = create_short_link_for_new_user(
+            contender_url,
+            email="stats-timeout@example.com",
+            destination="https://example.com/statistics-timeout",
+        )
+        logging = run_psql(database_container, "ALTER SYSTEM SET log_statement = 'all'")
+        reloaded = run_psql(database_container, "SELECT pg_reload_conf()")
+        assert logging.returncode == 0, logging.stderr
+        assert reloaded.returncode == 0, reloaded.stderr
+
+        with holding_links_table_lock(database_container, duration_seconds=5):
+            logs_before = read_container_logs(database_container)
+            request_started = time.monotonic()
+            statistics = get_short_link_stats(contender_url, token, short_code)
+            request_elapsed = time.monotonic() - request_started
+        logs_after = read_container_logs(database_container)
+
+        assert statistics == (503, b'{"error":"unavailable"}', "application/json")
+        assert 1.5 <= request_elapsed < 3.5
+        assert logs_after.startswith(logs_before)
+        request_logs = logs_after[len(logs_before) :]
+        assert request_logs.count("FROM links") == 1, request_logs
 
 
 def test_login_returns_the_standard_jwt_through_the_container_seam() -> None:

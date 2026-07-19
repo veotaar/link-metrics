@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from openapi_spec_validator import validate_spec
+from openapi_spec_validator import validate
 from openapi_spec_validator.validation.exceptions import OpenAPIValidationError
 
 
@@ -27,7 +27,7 @@ def lint_contract(document_path: Path) -> dict[str, Any]:
         raise ContractLintError(f"{document_path}: cannot read OpenAPI document: {error}") from error
 
     try:
-        validate_spec(document)
+        validate(document)
     except OpenAPIValidationError as error:
         raise ContractLintError(f"{document_path}: invalid OpenAPI document: {error}") from error
 

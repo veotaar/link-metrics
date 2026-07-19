@@ -10,7 +10,10 @@ dependencies = ["jsonschema==4.25.1", "openapi-spec-validator==0.7.2", "pyyaml==
 link-metrics = "link_metrics.cli:main"
 
 [dependency-groups]
-dev = ["pytest==8.4.2"]
+dev = [
+    "pytest==9.1.1",
+    "schemathesis==4.22.4",
+]
 
 [build-system]
 requires = ["uv_build==0.8.17"]

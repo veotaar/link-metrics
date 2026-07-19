@@ -20,6 +20,7 @@ __pycache__
 
 # Testing
 coverage
+.schemathesis
 
 # Turbo
 .turbo

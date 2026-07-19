@@ -9,3 +9,6 @@ uv run link-metrics contract lint
 ```
 
 Generated DTOs, validators, clients, or route declarations are derivatives. Change this document first and regenerate them; do not maintain a second wire contract inside a Contender.
+
+The Short Link creation response links its generated Short Code to owned statistics so
+the mandatory Schemathesis gate can derive stateful API sequences from this authority.

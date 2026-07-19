@@ -10,7 +10,7 @@ The repository has three independently testable authority seams:
 
 1. `contracts/http/openapi.yaml` is the sole human-authored HTTP authority. A Contender is observed as an opaque container through this API Contract.
 2. `database/migrations/` is the sole human-authored database authority. `database/schema.sql` is a generated review snapshot of a freshly migrated PostgreSQL catalog.
-3. `benchmark/` is the locked Python control plane. Its command interface discovers Contenders and will own conformance, orchestration, Dataset reset, and result bundles.
+3. `benchmark/` is the locked Python control plane. Its command interface discovers Contenders, enforces conformance, and will own orchestration, Dataset reset, and result bundles.
 
 Reusable JavaScript and TypeScript code belongs in `packages/`. Deployable stacks belong in `backends/`, regardless of language. Turborepo only orchestrates directories that are actual pnpm packages; the language-neutral authorities keep their native tooling.
 
@@ -41,6 +41,7 @@ Install the Python control plane reproducibly and exercise its public command se
 cd benchmark
 uv sync --locked
 uv run link-metrics contenders discover --root ..
+uv run link-metrics contenders conform express-node --root ..
 uv run link-metrics contract lint
 uv run pytest
 ```
@@ -62,7 +63,7 @@ The discovery command validates every `backends/<id>/contender.yaml` against `be
 
 The initial comparability identifiers are independent:
 
-- API Contract: `1.0.0` in `contracts/http/openapi.yaml`
+- API Contract: `1.0.1` in `contracts/http/openapi.yaml`
 - benchmark protocol: `1.0.0` in `benchmark/protocol/VERSION`
 - Benchmark Dataset: `1.2.0` in `benchmark/dataset/VERSION`
 

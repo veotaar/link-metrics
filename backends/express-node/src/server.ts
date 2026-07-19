@@ -332,6 +332,52 @@ app.post(
     }
   },
 );
+app.get("/api/links/:shortCode/stats", async (request, response) => {
+  const shortCode = request.params.shortCode;
+  if (!shortCode || !shortCodePattern.test(shortCode)) {
+    response.status(404).json({ error: "not_found" });
+    return;
+  }
+
+  try {
+    const result = await database.execute<{
+      click_count: string;
+      last_clicked_at: string | null;
+      original_url: string;
+      short_code: string;
+    }>(sql`
+      SELECT
+        short_code,
+        original_url,
+        click_count,
+        to_char(
+          last_clicked_at AT TIME ZONE 'UTC',
+          'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+        ) AS last_clicked_at
+      FROM links
+      WHERE short_code = ${shortCode}
+        AND user_id = ${response.locals.userId as string}
+      LIMIT 1
+    `);
+    const shortLink = result.rows[0];
+    if (!shortLink) {
+      response.status(404).json({ error: "not_found" });
+      return;
+    }
+
+    response
+      .status(200)
+      .type("application/json")
+      .send(
+        `{"shortCode":${JSON.stringify(shortLink.short_code)},` +
+          `"originalUrl":${JSON.stringify(shortLink.original_url)},` +
+          `"clickCount":${shortLink.click_count},` +
+          `"lastClickedAt":${JSON.stringify(shortLink.last_clicked_at)}}`,
+      );
+  } catch {
+    response.status(503).json({ error: "unavailable" });
+  }
+});
 app.post(
   "/api/auth/login",
   requireJsonContentType,
