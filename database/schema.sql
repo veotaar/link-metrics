@@ -1,6 +1,6 @@
 \restrict dbmate
 
--- Dumped from database version 18.4
+-- Dumped from database version 18.4 (Debian 18.4-1.pgdg12+1)
 -- Dumped by pg_dump version 18.4
 
 SET statement_timeout = 0;
@@ -14,6 +14,20 @@ SET check_function_bodies = false;
 SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
+
+--
+-- Name: pg_prewarm; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pg_prewarm WITH SCHEMA pg_catalog;
+
+
+--
+-- Name: EXTENSION pg_prewarm; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION pg_prewarm IS 'prewarm relation data';
+
 
 SET default_tablespace = '';
 
@@ -47,9 +61,10 @@ CREATE TABLE public.schema_migrations (
 
 CREATE TABLE public.users (
     id uuid DEFAULT uuidv7() NOT NULL,
-    email character varying(255) NOT NULL,
+    email character varying(254) NOT NULL,
     password_hash character varying(255) NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT users_email_is_canonical CHECK (((octet_length((email)::text) <= 254) AND ((email)::text = lower((email)::text)) AND (((email)::text COLLATE "C") ~ '^[a-z0-9.!#$%&''*+/=?^_\x60{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$'::text)))
 );
 
 
@@ -111,4 +126,5 @@ ALTER TABLE ONLY public.links
 --
 
 INSERT INTO public.schema_migrations (version) VALUES
-    ('20260604222601');
+    ('20260604222601'),
+    ('20260719000100');

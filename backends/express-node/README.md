@@ -1,12 +1,19 @@
 # Express on Node.js Contender
 
 This Contender is discovered from `contender.yaml` and built through its isolated OCI
-context. Its only implemented operation in the first vertical slice is `GET /health`.
+context. The current vertical slice implements `GET /health` and
+`POST /api/auth/register`.
 
 Readiness returns `204` after the PostgreSQL pool can read the expected dbmate migration
 version. A connection failure, pool timeout, query timeout, or migration mismatch returns
 `503` with `{"error":"unavailable"}`. The operation is operational only and is absent
 from `benchmark/protocol/scenarios.yaml`.
+
+Registration enforces the shared closed JSON Credentials contract before hashing the
+password with Node.js Argon2id v1.3 using the benchmark's fixed 64 MiB, three-iteration,
+four-lane profile. It persists the canonical email and encoded hash through one
+autocommit insert-and-return statement. Canonical email shape and uniqueness are also
+enforced by PostgreSQL.
 
 The container requires `DATABASE_URL`, `EXPECTED_MIGRATION_VERSION`, and `PORT`. The
 control plane supplies these inputs; the Contender neither applies migrations nor owns
