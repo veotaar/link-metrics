@@ -2,8 +2,8 @@
 
 This Contender is discovered from `contender.yaml` and built through its isolated OCI
 context. The current vertical slice implements `GET /health`, `POST /api/auth/register`,
-`POST /api/auth/login`, and authenticated `POST /api/links`, plus bearer authentication
-for the remaining protected API Contract paths.
+`POST /api/auth/login`, authenticated `POST /api/links`, and public `GET /{shortCode}`,
+plus bearer authentication for the remaining protected API Contract paths.
 
 Readiness returns `204` after the PostgreSQL pool can read the expected dbmate migration
 version. A connection failure, pool timeout, query timeout, or migration mismatch returns
@@ -28,6 +28,13 @@ owns deterministic eight-character Base62 Short Code generation and independentl
 enforces Short Code, destination, and nonnegative Click-count invariants. Creation uses
 one autocommit insert-and-return statement and returns only the contracted ownership,
 Short Code, destination, and timestamp fields.
+
+Short Link resolution uses one atomic autocommit update that increments the `BIGINT`
+Click count, records `last_clicked_at` with PostgreSQL `clock_timestamp()`, and returns the
+byte-preserved destination. The update commits before the Contender emits an empty `302`
+response. Missing Short Codes return canonical `404`; database failures and timeouts return
+canonical `503` without redirecting. Resolution has no cache, retry, batching, or explicit
+transaction-control path.
 
 The container requires `DATABASE_URL`, `EXPECTED_MIGRATION_VERSION`, and `PORT`. The
 control plane supplies these inputs; the Contender neither applies migrations nor owns

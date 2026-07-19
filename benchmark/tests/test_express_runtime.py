@@ -6,11 +6,13 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -149,6 +151,46 @@ def create_short_link(
     )
 
 
+def resolve_short_link(contender_url: str, short_code: str) -> tuple[int, bytes, str | None]:
+    parsed_url = urlsplit(contender_url)
+    connection = http.client.HTTPConnection(
+        parsed_url.hostname,
+        parsed_url.port,
+        timeout=10,
+    )
+    try:
+        connection.request("GET", f"/{short_code}")
+        response = connection.getresponse()
+        return response.status, response.read(), response.headers.get("Location")
+    finally:
+        connection.close()
+
+
+def create_short_link_for_new_user(
+    contender_url: str,
+    *,
+    email: str,
+    destination: str,
+) -> str:
+    registration = register_user(
+        contender_url,
+        json.dumps(
+            {"email": email, "password": "benchmark-password"},
+            separators=(",", ":"),
+        ).encode(),
+    )
+    login = login_user(contender_url, email, "benchmark-password")
+    assert registration[0] == 201
+    assert login[0] == 200
+    creation = create_short_link(
+        contender_url,
+        json.loads(login[1])["token"],
+        json.dumps({"url": destination}, separators=(",", ":")).encode(),
+    )
+    assert creation[0] == 201
+    return json.loads(creation[1])["shortCode"]
+
+
 def decode_jwt_part(part: str) -> dict:
     return json.loads(base64.urlsafe_b64decode(part + ("=" * (-len(part) % 4))))
 
@@ -189,6 +231,55 @@ def running_contender() -> Iterator[dict]:
     finally:
         stopped = run_control_plane("contenders", "stop", CONTENDER_ID)
         assert stopped.returncode == 0, stopped.stderr
+
+
+@contextmanager
+def holding_links_table_lock(
+    database_container: str,
+    *,
+    duration_seconds: int,
+) -> Iterator[None]:
+    lock_process = subprocess.Popen(
+        [
+            "docker",
+            "exec",
+            database_container,
+            "psql",
+            "--host",
+            "127.0.0.1",
+            "--username",
+            "link_metrics_control",
+            "--dbname",
+            "link_metrics",
+            "--command",
+            "BEGIN; LOCK TABLE public.links IN ACCESS EXCLUSIVE MODE; "
+            f"SELECT pg_sleep({duration_seconds}); COMMIT;",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    lock_deadline = time.monotonic() + 2
+    while time.monotonic() < lock_deadline:
+        lock_state = run_psql(
+            database_container,
+            "SELECT count(*) FROM pg_catalog.pg_locks "
+            "WHERE relation = 'public.links'::regclass "
+            "AND mode = 'AccessExclusiveLock' AND granted",
+        )
+        if lock_state.returncode == 0 and lock_state.stdout.strip() == "1":
+            break
+        time.sleep(0.02)
+    else:
+        lock_process.terminate()
+        lock_process.communicate(timeout=5)
+        raise AssertionError("failed to acquire the links table lock")
+
+    try:
+        yield
+    finally:
+        lock_stdout, lock_stderr = lock_process.communicate(timeout=duration_seconds + 5)
+        assert lock_process.returncode == 0, lock_stdout + lock_stderr
 
 
 def test_short_link_creation_returns_owned_deterministic_short_links() -> None:
@@ -396,6 +487,38 @@ def test_short_link_constraints_match_the_api_destination_boundary() -> None:
         assert all(result.returncode != 0 for result in rejected)
 
 
+def test_short_link_analytics_columns_preserve_the_database_invariants() -> None:
+    with running_contender() as state:
+        database_container = state["database"]["container"]
+        columns = run_psql(
+            database_container,
+            "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'links' "
+            "AND column_name IN ('click_count', 'last_clicked_at') ORDER BY column_name",
+        )
+        assert columns.returncode == 0, columns.stderr
+        assert columns.stdout.strip().splitlines() == [
+            "click_count|bigint|NO",
+            "last_clicked_at|timestamp with time zone|YES",
+        ]
+
+        inserted_user = run_psql(
+            database_container,
+            "INSERT INTO public.users (email, password_hash) "
+            "VALUES ('bigint-clicks@example.com', 'unused-hash') RETURNING id",
+        )
+        assert inserted_user.returncode == 0, inserted_user.stderr
+        user_id = inserted_user.stdout.splitlines()[0]
+        large_count = run_psql(
+            database_container,
+            "INSERT INTO public.links (original_url, click_count, user_id) "
+            f"VALUES ('https://example.com/bigint', 2147483648, '{user_id}') "
+            "RETURNING click_count, last_clicked_at IS NULL",
+        )
+        assert large_count.returncode == 0, large_count.stderr
+        assert large_count.stdout.splitlines()[0] == "2147483648|t"
+
+
 def test_short_link_creation_uses_one_autocommit_read_committed_statement() -> None:
     with running_contender() as state:
         contender_url = state["contender"]["url"]
@@ -443,6 +566,204 @@ def test_short_link_creation_uses_one_autocommit_read_committed_statement() -> N
         assert "returning" in request_logs
         assert "statement: BEGIN" not in request_logs
         assert "statement: COMMIT" not in request_logs
+
+
+def test_short_link_resolution_commits_the_first_click_before_redirecting() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        database_container = state["database"]["container"]
+        destination = "https://Example.COM/a%2Fb?source=Resolution#Result"
+        short_code = create_short_link_for_new_user(
+            contender_url,
+            email="resolution@example.com",
+            destination=destination,
+        )
+
+        before = run_psql(
+            database_container,
+            "SELECT click_count, last_clicked_at IS NULL FROM public.links "
+            f"WHERE short_code = '{short_code}'",
+        )
+        assert before.returncode == 0, before.stderr
+        assert before.stdout.strip() == "0|t"
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with holding_links_table_lock(database_container, duration_seconds=1):
+                pending_response = executor.submit(resolve_short_link, contender_url, short_code)
+                blocked_deadline = time.monotonic() + 1
+                while time.monotonic() < blocked_deadline:
+                    blocked = run_psql(
+                        database_container,
+                        "SELECT count(*) FROM pg_catalog.pg_stat_activity "
+                        "WHERE usename = 'link_metrics_contender' "
+                        "AND wait_event_type = 'Lock' AND query LIKE '%UPDATE links%'",
+                    )
+                    if blocked.returncode == 0 and blocked.stdout.strip() == "1":
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise AssertionError("resolution update did not wait for the links lock")
+                assert not pending_response.done()
+            response = pending_response.result(timeout=5)
+
+        assert response == (302, b"", destination)
+        after = run_psql(
+            database_container,
+            "SELECT click_count, last_clicked_at FROM public.links "
+            f"WHERE short_code = '{short_code}'",
+        )
+        assert after.returncode == 0, after.stderr
+        click_count, last_clicked_at = after.stdout.strip().split("|")
+        assert click_count == "1"
+        assert datetime.fromisoformat(last_clicked_at).utcoffset().total_seconds() == 0
+
+
+def test_short_link_resolution_returns_canonical_not_found_for_a_missing_code() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        missing = resolve_short_link(contender_url, "zzzzzzzz")
+        invalid = resolve_short_link(contender_url, "not-a-code")
+
+        assert missing == (404, b'{"error":"not_found"}', None)
+        assert invalid == missing
+
+
+def test_short_link_resolution_failure_never_redirects_or_changes_analytics() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        database_container = state["database"]["container"]
+        short_code = create_short_link_for_new_user(
+            contender_url,
+            email="failed-resolution@example.com",
+            destination="https://example.com/database-failure",
+        )
+        revoked = run_psql(
+            database_container,
+            "REVOKE UPDATE ON TABLE public.links FROM link_metrics_contender",
+        )
+        assert revoked.returncode == 0, revoked.stderr
+
+        response = resolve_short_link(contender_url, short_code)
+
+        assert response == (503, b'{"error":"unavailable"}', None)
+        analytics = run_psql(
+            database_container,
+            "SELECT click_count, last_clicked_at IS NULL FROM public.links "
+            f"WHERE short_code = '{short_code}'",
+        )
+        assert analytics.returncode == 0, analytics.stderr
+        assert analytics.stdout.strip() == "0|t"
+
+
+def test_short_link_resolution_timeout_never_redirects_or_retries() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        database_container = state["database"]["container"]
+        short_code = create_short_link_for_new_user(
+            contender_url,
+            email="timed-resolution@example.com",
+            destination="https://example.com/database-timeout",
+        )
+        logging = run_psql(database_container, "ALTER SYSTEM SET log_statement = 'all'")
+        reloaded = run_psql(database_container, "SELECT pg_reload_conf()")
+        assert logging.returncode == 0, logging.stderr
+        assert reloaded.returncode == 0, reloaded.stderr
+
+        with holding_links_table_lock(database_container, duration_seconds=5):
+            logs_before = read_container_logs(database_container)
+            request_started = time.monotonic()
+            response = resolve_short_link(contender_url, short_code)
+            request_elapsed = time.monotonic() - request_started
+        logs_after = read_container_logs(database_container)
+
+        assert response == (503, b'{"error":"unavailable"}', None)
+        assert 1.5 <= request_elapsed < 3.5
+        assert logs_after.startswith(logs_before)
+        request_logs = logs_after[len(logs_before) :]
+        assert request_logs.count("UPDATE links") == 1, request_logs
+        analytics = run_psql(
+            database_container,
+            "SELECT click_count, last_clicked_at IS NULL FROM public.links "
+            f"WHERE short_code = '{short_code}'",
+        )
+        assert analytics.returncode == 0, analytics.stderr
+        assert analytics.stdout.strip() == "0|t"
+
+
+def test_short_link_resolution_uses_one_atomic_autocommit_statement() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        database_container = state["database"]["container"]
+        destination = "https://example.com/one-resolution-statement"
+        short_code = create_short_link_for_new_user(
+            contender_url,
+            email="resolution-statement@example.com",
+            destination=destination,
+        )
+
+        isolation = run_psql(database_container, "SHOW default_transaction_isolation")
+        logging = run_psql(database_container, "ALTER SYSTEM SET log_statement = 'all'")
+        reloaded = run_psql(database_container, "SELECT pg_reload_conf()")
+        disconnected = run_psql(
+            database_container,
+            "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+            "WHERE usename = 'link_metrics_contender'",
+        )
+        assert isolation.returncode == 0, isolation.stderr
+        assert isolation.stdout.strip() == "read committed"
+        assert logging.returncode == 0, logging.stderr
+        assert reloaded.returncode == 0, reloaded.stderr
+        assert disconnected.returncode == 0, disconnected.stderr
+
+        logs_before = read_container_logs(database_container)
+        response = resolve_short_link(contender_url, short_code)
+        logs_after = read_container_logs(database_container)
+
+        assert response == (302, b"", destination)
+        assert logs_after.startswith(logs_before)
+        request_logs = logs_after[len(logs_before) :]
+        statement_lines = [
+            line
+            for line in request_logs.splitlines()
+            if "statement:" in line or "execute <unnamed>:" in line
+        ]
+        assert len(statement_lines) == 1, request_logs
+        assert "UPDATE links" in request_logs
+        assert "click_count = click_count + 1" in request_logs
+        assert "last_clicked_at = clock_timestamp()" in request_logs
+        assert "RETURNING original_url" in request_logs
+        assert "statement: BEGIN" not in request_logs
+        assert "statement: COMMIT" not in request_logs
+
+
+def test_concurrent_short_link_resolutions_account_for_every_click() -> None:
+    with running_contender() as state:
+        contender_url = state["contender"]["url"]
+        database_container = state["database"]["container"]
+        destination = "https://example.com/viral-resolution"
+        short_code = create_short_link_for_new_user(
+            contender_url,
+            email="viral-resolution@example.com",
+            destination=destination,
+        )
+        request_count = 20
+        start = threading.Barrier(request_count)
+
+        def resolve_at_once(_index: int) -> tuple[int, bytes, str | None]:
+            start.wait(timeout=5)
+            return resolve_short_link(contender_url, short_code)
+
+        with ThreadPoolExecutor(max_workers=request_count) as executor:
+            responses = list(executor.map(resolve_at_once, range(request_count)))
+
+        assert responses == [(302, b"", destination)] * request_count
+        analytics = run_psql(
+            database_container,
+            "SELECT click_count, last_clicked_at IS NOT NULL FROM public.links "
+            f"WHERE short_code = '{short_code}'",
+        )
+        assert analytics.returncode == 0, analytics.stderr
+        assert analytics.stdout.strip() == f"{request_count}|t"
 
 
 def test_login_returns_the_standard_jwt_through_the_container_seam() -> None:
@@ -978,7 +1299,7 @@ def test_control_plane_manages_the_express_contender_through_its_container_seam(
         assert started.returncode == 0, started.stderr
         start_state = json.loads(started.stdout)
         assert start_state["database"]["status"] == "running"
-        assert start_state["database"]["migrationVersion"] == "20260719000200"
+        assert start_state["database"]["migrationVersion"] == "20260719000300"
         assert isinstance(start_state["database"]["port"], int)
         assert start_state["contender"]["id"] == CONTENDER_ID
         assert start_state["contender"]["status"] == "running"
@@ -1023,7 +1344,7 @@ def test_database_role_and_extension_boundaries_are_mechanically_enforced() -> N
             contender_role=True,
         )
         assert migration_read.returncode == 0, migration_read.stderr
-        assert migration_read.stdout.strip() == "20260719000200"
+        assert migration_read.stdout.strip() == "20260719000300"
 
         database_address = subprocess.run(
             [
@@ -1111,14 +1432,14 @@ def test_readiness_reports_migration_drift_and_database_loss() -> None:
         drift = run_psql(
             database_container,
             "UPDATE public.schema_migrations SET version = 'unexpected' "
-            "WHERE version = '20260719000200'",
+            "WHERE version = '20260719000300'",
         )
         assert drift.returncode == 0, drift.stderr
         assert read_health(url) == (503, b'{"error":"unavailable"}', "application/json")
 
         restored = run_psql(
             database_container,
-            "UPDATE public.schema_migrations SET version = '20260719000200' "
+            "UPDATE public.schema_migrations SET version = '20260719000300' "
             "WHERE version = 'unexpected'",
         )
         assert restored.returncode == 0, restored.stderr

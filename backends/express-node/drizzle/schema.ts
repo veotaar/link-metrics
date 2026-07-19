@@ -1,4 +1,4 @@
-import { pgTable, uniqueIndex, check, uuid, varchar, timestamp, index, foreignKey, text, integer, pgSequence } from "drizzle-orm/pg-core"
+import { pgTable, uniqueIndex, check, uuid, varchar, timestamp, index, foreignKey, text, bigint, pgSequence } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
 
@@ -17,9 +17,11 @@ export const users = pgTable("users", {
 export const links = pgTable("links", {
 	shortCode: varchar("short_code", { length: 8 }).default(sql`(short_code_from_sequence(nextval(\'links_short_code_sequence\'::regclass)) COLLATE "C")`).primaryKey().notNull(),
 	originalUrl: text("original_url").notNull(),
-	clickCount: integer("click_count").default(0).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	clickCount: bigint("click_count", { mode: "number" }).default(0).notNull(),
 	userId: uuid("user_id").notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	lastClickedAt: timestamp("last_clicked_at", { withTimezone: true, mode: 'string' }),
 }, (table) => [
 	index("idx_links_user_id").using("btree", table.userId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({

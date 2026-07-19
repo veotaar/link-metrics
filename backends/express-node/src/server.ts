@@ -53,6 +53,7 @@ const emailPattern =
 const passwordPattern = /^[\x20-\x7e]{8,128}$/;
 const destinationPattern =
   /^https?:\/\/(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?(?:[/?#][\x21-\x7e]*)?$/;
+const shortCodePattern = /^[0-9A-Za-z]{8}$/;
 
 function requestRecord(body: unknown): Record<string, unknown> | undefined {
   return typeof body === "object" && body !== null && !Array.isArray(body)
@@ -456,6 +457,33 @@ app.get("/health", async (_request, response) => {
   }
 
   response.status(503).json({ error: "unavailable" });
+});
+app.get("/:shortCode", async (request, response) => {
+  const shortCode = request.params.shortCode;
+  if (!shortCode || !shortCodePattern.test(shortCode)) {
+    response.status(404).json({ error: "not_found" });
+    return;
+  }
+
+  try {
+    const result = await database.execute<{ original_url: string }>(sql`
+      UPDATE links
+      SET
+        click_count = click_count + 1,
+        last_clicked_at = clock_timestamp()
+      WHERE short_code = ${shortCode}
+      RETURNING original_url
+    `);
+    const shortLink = result.rows[0];
+    if (!shortLink) {
+      response.status(404).json({ error: "not_found" });
+      return;
+    }
+
+    response.status(302).set("Location", shortLink.original_url).end();
+  } catch {
+    response.status(503).json({ error: "unavailable" });
+  }
 });
 
 const server = app.listen(port, "0.0.0.0", () => {

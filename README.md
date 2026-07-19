@@ -64,7 +64,7 @@ The initial comparability identifiers are independent:
 
 - API Contract: `1.0.0` in `contracts/http/openapi.yaml`
 - benchmark protocol: `1.0.0` in `benchmark/protocol/VERSION`
-- Benchmark Dataset: `1.1.0` in `benchmark/dataset/VERSION`
+- Benchmark Dataset: `1.2.0` in `benchmark/dataset/VERSION`
 
 A **Result Series** may compare results only when its API Contract version, protocol version, Benchmark Dataset version, and environment fingerprint all match exactly.
 
