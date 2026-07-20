@@ -5,14 +5,17 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
+from link_metrics.conformance import run_conformance_checks
 from link_metrics.dataset import DatasetError, describe_dataset, sample_workload
 from link_metrics.dataset_runtime import inspect_template, reset_from_template
 from link_metrics.runtime import (
+    CONTROL_ROLE,
     CONTENDER_PASSWORD,
     CONTENDER_ROLE,
     DATABASE_NAME,
@@ -61,6 +64,12 @@ TRANSPORT = {
     "httpTimeoutSeconds": 5,
 }
 
+LOCAL_RESOURCE_PROFILE = {
+    "contender": {"cpusetCpus": "0-3", "memoryBytes": 8 * 1024**3},
+    "postgres": {"cpusetCpus": "4-5", "memoryBytes": 8 * 1024**3},
+    "k6": {"cpusetCpus": "6-7", "memoryBytes": 4 * 1024**3},
+}
+
 
 class TrialError(Exception):
     """The control plane could not run or record a Trial."""
@@ -82,6 +91,8 @@ def evaluate_validity(metrics: dict[str, Any]) -> dict[str, Any]:
         reasons.append("k6_could_not_schedule_offered_rate")
     if bool(metrics.get("k6CpuSaturated", False)):
         reasons.append("k6_cpu_saturated")
+    if not bool(metrics.get("k6CpuObserved", True)):
+        reasons.append("k6_cpu_observation_failed")
     return {"valid": not reasons, "reasons": reasons}
 
 
@@ -97,7 +108,18 @@ def write_result_bundle(output: Path, payload: dict[str, Any]) -> dict[str, Any]
     bundle = {"schemaVersion": 1, **payload}
     serialized = json.dumps(bundle, indent=2, sort_keys=True) + "\n"
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(serialized, encoding="utf-8")
+    try:
+        descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError as error:
+        raise TrialError(f"result bundle already exists: {output}") from error
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(serialized)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        output.unlink(missing_ok=True)
+        raise
     return json.loads(serialized)
 
 
@@ -182,8 +204,22 @@ def _image_digest(image: str) -> str:
     return identity.stdout.strip()
 
 
-def _environment_fingerprint(contender: dict[str, Any]) -> dict[str, Any]:
+def _container_limits(container: str) -> dict[str, Any]:
+    document = _container_document(container)
+    host_config = document["HostConfig"]
+    return {
+        "cpusetCpus": host_config.get("CpusetCpus") or None,
+        "memoryBytes": int(host_config.get("Memory") or 0),
+        "memorySwapBytes": int(host_config.get("MemorySwap") or 0),
+        "nanoCpus": int(host_config.get("NanoCpus") or 0),
+    }
+
+
+def _environment_fingerprint(
+    root: Path, contender: dict[str, Any], *, k6_limits: dict[str, Any]
+) -> dict[str, Any]:
     memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    names = _resource_names(root, contender["id"])
     return {
         "resourceProfile": contender["resourceProfile"],
         "hostname": platform.node(),
@@ -194,12 +230,11 @@ def _environment_fingerprint(contender: dict[str, Any]) -> dict[str, Any]:
         "memoryBytes": memory,
         "k6Image": K6_IMAGE,
         "postgresImage": POSTGRES_IMAGE,
-        "k6Cpus": 2,
-        "k6MemoryGiB": 4,
-        "contenderCpus": 4,
-        "contenderMemoryGiB": 8,
-        "postgresCpus": 2,
-        "postgresMemoryGiB": 8,
+        "containers": {
+            "contender": _container_limits(names.contender),
+            "postgres": _container_limits(names.database),
+            "k6": k6_limits,
+        },
     }
 
 
@@ -221,22 +256,167 @@ def _remove_k6(root: Path, contender_id: str) -> None:
         _docker("rm", "--force", name, check=False)
 
 
-def _k6_cpu_percent(container: str) -> float:
+_DOCKER_SIZE_UNITS = {
+    "B": 1,
+    "kB": 1000,
+    "MB": 1000**2,
+    "GB": 1000**3,
+    "KiB": 1024,
+    "MiB": 1024**2,
+    "GiB": 1024**3,
+}
+
+
+def _docker_bytes(value: str) -> int:
+    match = re.fullmatch(r"\s*([0-9.]+)\s*([kMGT]?i?B)\s*", value)
+    if not match or match.group(2) not in _DOCKER_SIZE_UNITS:
+        raise ValueError(f"unrecognized Docker size: {value}")
+    return round(float(match.group(1)) * _DOCKER_SIZE_UNITS[match.group(2)])
+
+
+def _resource_sample(containers: list[str]) -> dict[str, dict[str, Any]]:
     raw = _docker(
         "stats",
         "--no-stream",
         "--format",
-        "{{.CPUPerc}}",
-        container,
+        "{{json .}}",
+        *containers,
         check=False,
     )
     if raw.returncode != 0:
-        return 0.0
-    text = raw.stdout.strip().rstrip("%")
+        return {}
+    samples: dict[str, dict[str, Any]] = {}
     try:
-        return float(text)
-    except ValueError:
-        return 0.0
+        for line in raw.stdout.splitlines():
+            item = json.loads(line)
+            memory_usage, _ = item["MemUsage"].split("/", 1)
+            network_received, network_sent = item["NetIO"].split("/", 1)
+            block_read, block_written = item["BlockIO"].split("/", 1)
+            samples[item["Name"]] = {
+                "cpuPercent": float(item["CPUPerc"].strip().rstrip("%")),
+                "residentMemoryBytes": _docker_bytes(memory_usage),
+                "networkReceivedBytes": _docker_bytes(network_received),
+                "networkSentBytes": _docker_bytes(network_sent),
+                "blockReadBytes": _docker_bytes(block_read),
+                "blockWrittenBytes": _docker_bytes(block_written),
+            }
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return samples
+
+
+def _postgres_activity_snapshot(container: str) -> dict[str, Any]:
+    query = """
+SELECT json_build_object(
+  'transactions', json_build_object(
+    'committed', xact_commit,
+    'rolledBack', xact_rollback,
+    'deadlocks', deadlocks
+  ),
+  'databaseBlocks', json_build_object('read', blks_read, 'cacheHits', blks_hit),
+  'locks', (
+    SELECT json_build_object(
+      'granted', count(*) FILTER (WHERE granted),
+      'waiting', count(*) FILTER (WHERE NOT granted)
+    ) FROM pg_catalog.pg_locks
+  ),
+  'ioOperations', (
+    SELECT json_build_object(
+      'reads', coalesce(sum(reads), 0),
+      'writes', coalesce(sum(writes), 0),
+      'writebacks', coalesce(sum(writebacks), 0),
+      'extends', coalesce(sum(extends), 0),
+      'fsyncs', coalesce(sum(fsyncs), 0)
+    ) FROM pg_catalog.pg_stat_io
+  )
+)
+FROM pg_catalog.pg_stat_database
+WHERE datname = current_database();
+"""
+    result = _docker(
+        "exec",
+        container,
+        "psql",
+        "--username",
+        CONTROL_ROLE,
+        "--dbname",
+        DATABASE_NAME,
+        "--tuples-only",
+        "--no-align",
+        "--command",
+        query,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {"observed": False, "error": result.stderr.strip() or "psql failed"}
+    try:
+        return {"observed": True, "values": json.loads(result.stdout.strip())}
+    except json.JSONDecodeError:
+        return {"observed": False, "error": "PostgreSQL returned invalid telemetry JSON"}
+
+
+def _summarize_resource_samples(
+    samples: dict[str, list[tuple[float, dict[str, Any]]]]
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for container, observations in samples.items():
+        if not observations:
+            summary[container] = {"observed": False}
+            continue
+        cpu_seconds = 0.0
+        for (previous_at, _), (sampled_at, sample) in zip(observations, observations[1:]):
+            cpu_seconds += sample["cpuPercent"] / 100 * (sampled_at - previous_at)
+        memories = [sample["residentMemoryBytes"] for _, sample in observations]
+        first = observations[0][1]
+        last = observations[-1][1]
+        summary[container] = {
+            "observed": True,
+            "sampleCount": len(observations),
+            "cpuTimeSecondsEstimate": cpu_seconds,
+            "averageResidentMemoryBytes": sum(memories) / len(memories),
+            "peakResidentMemoryBytes": max(memories),
+            "networkBytes": {
+                "received": max(0, last["networkReceivedBytes"] - first["networkReceivedBytes"]),
+                "sent": max(0, last["networkSentBytes"] - first["networkSentBytes"]),
+            },
+            "blockIoBytes": {
+                "read": max(0, last["blockReadBytes"] - first["blockReadBytes"]),
+                "written": max(0, last["blockWrittenBytes"] - first["blockWrittenBytes"]),
+            },
+        }
+    return summary
+
+
+def _apply_official_resource_profile(root: Path, contender_id: str) -> None:
+    """Apply the versioned local profile before an official measurement."""
+    names = _resource_names(root, contender_id)
+    for container, profile in (
+        (names.contender, LOCAL_RESOURCE_PROFILE["contender"]),
+        (names.database, LOCAL_RESOURCE_PROFILE["postgres"]),
+    ):
+        memory = str(profile["memoryBytes"])
+        _docker(
+            "update",
+            "--cpuset-cpus",
+            str(profile["cpusetCpus"]),
+            "--memory",
+            memory,
+            "--memory-swap",
+            memory,
+            container,
+        )
+        actual = _container_limits(container)
+        expected = {
+            "cpusetCpus": profile["cpusetCpus"],
+            "memoryBytes": profile["memoryBytes"],
+            "memorySwapBytes": profile["memoryBytes"],
+            "nanoCpus": 0,
+        }
+        if actual != expected:
+            raise TrialError(
+                f"container {container} does not match the official resource profile: "
+                f"expected {expected}, got {actual}"
+            )
 
 
 def run_k6(
@@ -249,7 +429,8 @@ def run_k6(
     repetition: int,
     validation_flags: list[bool],
     work_dir: Path,
-) -> tuple[dict[str, Any], bool]:
+    official: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Run the pinned registration script against a Contender URL."""
     root = root.resolve()
     script = (root / REGISTRATION_SCRIPT).resolve()
@@ -274,13 +455,13 @@ def run_k6(
     private_url = f"http://{names.contender}:{contender['port']}"
     target_url = private_url if base_url.startswith("http://127.0.0.1") else base_url
 
-    pre_allocated = max(20, min(256, offered_rate * 4))
-    max_vus = max(pre_allocated, min(256, offered_rate * 8))
+    pre_allocated = 256
+    max_vus = 256
     assigned_cpus = 2.0
 
     try:
         _docker("pull", K6_IMAGE, check=False)
-        _docker(
+        docker_arguments = [
             "run",
             "--detach",
             "--name",
@@ -289,45 +470,87 @@ def run_k6(
             network,
             "--cpus",
             "2",
-            "--memory",
-            "4g",
-            "--memory-swap",
-            "4g",
-            "--label",
-            "dev.link-metrics.control-plane=true",
-            "--volume",
-            f"{script.parent}:/scripts:ro",
-            "--volume",
-            f"{work_dir.resolve()}:/work",
-            "--workdir",
-            "/scripts",
-            "--env",
-            f"BASE_URL={target_url}",
-            "--env",
-            f"OFFERED_RATE={offered_rate}",
-            "--env",
-            f"DURATION={duration_seconds}s",
-            "--env",
-            f"REPETITION={repetition}",
-            "--env",
-            f"PASSWORD={BENCHMARK_PASSWORD}",
-            "--env",
-            f"PRE_ALLOCATED_VUS={pre_allocated}",
-            "--env",
-            f"MAX_VUS={max_vus}",
-            "--env",
-            "VALIDATION_FLAGS_PATH=/work/validation-flags.json",
-            "--env",
-            "SUMMARY_PATH=/work/summary.json",
-            K6_IMAGE,
-            "run",
-            "registration.js",
+        ]
+        if official:
+            docker_arguments.extend(
+                ["--cpuset-cpus", str(LOCAL_RESOURCE_PROFILE["k6"]["cpusetCpus"])]
+            )
+        docker_arguments.extend(
+            [
+                "--memory",
+                "4g",
+                "--memory-swap",
+                "4g",
+                "--label",
+                "dev.link-metrics.control-plane=true",
+                "--volume",
+                f"{script.parent}:/scripts:ro",
+                "--volume",
+                f"{work_dir.resolve()}:/work",
+                "--workdir",
+                "/scripts",
+                "--env",
+                f"BASE_URL={target_url}",
+                "--env",
+                f"OFFERED_RATE={offered_rate}",
+                "--env",
+                f"DURATION={duration_seconds}s",
+                "--env",
+                f"REPETITION={repetition}",
+                "--env",
+                f"PASSWORD={BENCHMARK_PASSWORD}",
+                "--env",
+                f"PRE_ALLOCATED_VUS={pre_allocated}",
+                "--env",
+                f"MAX_VUS={max_vus}",
+                "--env",
+                "VALIDATION_FLAGS_PATH=/work/validation-flags.json",
+                "--env",
+                "SUMMARY_PATH=/work/summary.json",
+                K6_IMAGE,
+                "run",
+                "registration.js",
+            ]
         )
+        _docker(*docker_arguments)
+        actual_k6_limits = _container_limits(container)
+        if official:
+            expected_k6_limits = {
+                "cpusetCpus": LOCAL_RESOURCE_PROFILE["k6"]["cpusetCpus"],
+                "memoryBytes": LOCAL_RESOURCE_PROFILE["k6"]["memoryBytes"],
+                "memorySwapBytes": LOCAL_RESOURCE_PROFILE["k6"]["memoryBytes"],
+                "nanoCpus": 2_000_000_000,
+            }
+            if actual_k6_limits != expected_k6_limits:
+                raise TrialError(
+                    "k6 does not match the official resource profile: "
+                    f"expected {expected_k6_limits}, got {actual_k6_limits}"
+                )
         peak_cpu = 0.0
+        cpu_samples = 0
+        cpu_sample_failures = 0
+        telemetry_containers = {
+            "contender": names.contender,
+            "postgres": names.database,
+            "k6": container,
+        }
+        measured_containers = list(telemetry_containers.values())
+        resource_samples: dict[str, list[tuple[float, dict[str, Any]]]] = {
+            name: [] for name in measured_containers
+        }
         deadline = time.monotonic() + duration_seconds + 120
         while time.monotonic() < deadline:
             document = _container_document(container)
-            peak_cpu = max(peak_cpu, _k6_cpu_percent(container))
+            sampled_at = time.monotonic()
+            sample = _resource_sample(measured_containers)
+            for name, values in sample.items():
+                resource_samples[name].append((sampled_at, values))
+            k6_sample = sample.get(container)
+            if k6_sample is None:
+                cpu_sample_failures += 1
+            else:
+                cpu_samples += 1
+                peak_cpu = max(peak_cpu, k6_sample["cpuPercent"])
             if document["State"]["Status"] != "running":
                 break
             time.sleep(0.5)
@@ -336,14 +559,34 @@ def run_k6(
             raise TrialError("k6 did not finish within the Trial watchdog window")
 
         logs = _docker("logs", container, check=False)
-        saturated = peak_cpu >= (assigned_cpus * 100.0) * 0.95
+        exit_code = int(document["State"].get("ExitCode", 1))
+        if exit_code != 0:
+            raise TrialError(
+                f"k6 exited with status {exit_code}: "
+                + (logs.stderr.strip() or logs.stdout.strip() or "no container logs")
+            )
+        saturation_threshold = (assigned_cpus * 100.0) * 0.95
+        saturated = peak_cpu >= saturation_threshold
         if not summary_path.is_file():
             raise TrialError(
                 "k6 did not emit summary.json: "
                 + (logs.stderr.strip() or logs.stdout.strip() or "no container logs")
             )
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        return summary, saturated
+        summarized_resources = _summarize_resource_samples(resource_samples)
+        return summary, {
+            "assignedCpus": assigned_cpus,
+            "peakCpuPercent": peak_cpu,
+            "saturationThresholdPercent": saturation_threshold,
+            "sampleCount": cpu_samples,
+            "sampleFailures": cpu_sample_failures,
+            "observed": cpu_samples > 0,
+            "saturated": saturated,
+            "containerLimits": actual_k6_limits,
+        }, {
+            role: summarized_resources[container_name]
+            for role, container_name in telemetry_containers.items()
+        }
     finally:
         _remove_k6(root, contender_id)
 
@@ -414,6 +657,8 @@ def run_registration_trial(
 ) -> dict[str, Any]:
     """Execute one registration Trial lifecycle and write its raw bundle."""
     root = root.resolve()
+    if output.exists():
+        raise TrialError(f"result bundle already exists: {output}")
     if mode not in {"smoke", "trial"}:
         raise TrialError("mode must be smoke or trial")
     if mode == "smoke":
@@ -449,6 +694,10 @@ def run_registration_trial(
             ) from error
 
         base_url = _contender_base_url(root, contender_id)
+        conformance = None
+        if official:
+            _apply_official_resource_profile(root, contender_id)
+            conformance = run_conformance_checks(root, contender_id, base_url)
         expected_warm = max(rate * warm_seconds * 2, 100)
         warm_flags = build_validation_flags(root, repetition=repetition, count=int(expected_warm))
         run_k6(
@@ -460,6 +709,7 @@ def run_registration_trial(
             repetition=repetition,
             validation_flags=warm_flags,
             work_dir=work_dir / "warm",
+            official=official,
         )
 
         reset = reset_from_template(root, contender_id, template["templateChecksum"])
@@ -469,7 +719,10 @@ def run_registration_trial(
         measure_flags = build_validation_flags(
             root, repetition=repetition, count=int(expected_measure)
         )
-        summary, saturated = run_k6(
+        postgres_before = _postgres_activity_snapshot(
+            _resource_names(root, contender_id).database
+        )
+        summary, k6_health, resource_telemetry = run_k6(
             root,
             contender_id=contender_id,
             base_url=base_url,
@@ -478,13 +731,18 @@ def run_registration_trial(
             repetition=repetition,
             validation_flags=measure_flags,
             work_dir=work_dir / "measure",
+            official=official,
+        )
+        postgres_after = _postgres_activity_snapshot(
+            _resource_names(root, contender_id).database
         )
         parsed = parse_k6_summary(summary)
         offered_iterations = rate * measure_seconds
         validity = evaluate_validity(
             {
                 "droppedIterations": parsed["droppedIterations"],
-                "k6CpuSaturated": saturated,
+                "k6CpuSaturated": k6_health["saturated"],
+                "k6CpuObserved": k6_health["observed"],
             }
         )
         names = _resource_names(root, contender_id)
@@ -508,7 +766,11 @@ def run_registration_trial(
                     "manifest": contender,
                 },
                 "environment": {
-                    "fingerprint": _environment_fingerprint(contender),
+                    "fingerprint": _environment_fingerprint(
+                        root,
+                        contender,
+                        k6_limits=k6_health["containerLimits"],
+                    ),
                     "k6Image": K6_IMAGE,
                     "postgresImage": POSTGRES_IMAGE,
                 },
@@ -530,12 +792,19 @@ def run_registration_trial(
                     "errors": parsed["errors"],
                     "checksPassed": parsed["checksPassed"],
                     "checksFailed": parsed["checksFailed"],
+                    "resourceTelemetry": resource_telemetry,
+                    "postgresTelemetry": {
+                        "before": postgres_before,
+                        "after": postgres_after,
+                    },
                 },
                 "validity": {
                     **validity,
                     "k6SchedulingHealthy": parsed["droppedIterations"] == 0,
-                    "k6CpuSaturated": saturated,
+                    "k6CpuSaturated": k6_health["saturated"],
+                    "k6CpuEvidence": k6_health,
                 },
+                "conformance": conformance,
                 "contenderConstraints": CONTENDER_CONSTRAINTS,
             },
         )

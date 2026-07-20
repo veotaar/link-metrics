@@ -5,8 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from link_metrics.trial import (
     TrialError,
+    _docker_bytes,
+    _summarize_resource_samples,
     evaluate_validity,
     registration_email,
     write_result_bundle,
@@ -217,3 +221,64 @@ def test_write_result_bundle_rejects_official_smoke_label(tmp_path: Path) -> Non
         assert "smoke" in str(error)
     else:
         raise AssertionError("expected TrialError")
+
+
+def test_write_result_bundle_refuses_to_overwrite_evidence(tmp_path: Path) -> None:
+    output = tmp_path / "existing.json"
+    output.write_text("original\n", encoding="utf-8")
+
+    with pytest.raises(TrialError, match="already exists"):
+        write_result_bundle(output, {"official": False, "mode": "smoke"})
+
+    assert output.read_text(encoding="utf-8") == "original\n"
+
+
+def test_trial_is_invalid_without_k6_cpu_evidence() -> None:
+    validity = evaluate_validity(
+        {
+            "droppedIterations": 0,
+            "k6CpuSaturated": False,
+            "k6CpuObserved": False,
+        }
+    )
+
+    assert validity["valid"] is False
+    assert "k6_cpu_observation_failed" in validity["reasons"]
+
+
+def test_resource_samples_preserve_trial_telemetry() -> None:
+    assert _docker_bytes("1.5MiB") == 1_572_864
+    summary = _summarize_resource_samples(
+        {
+            "contender": [
+                (
+                    10.0,
+                    {
+                        "cpuPercent": 50.0,
+                        "residentMemoryBytes": 100,
+                        "networkReceivedBytes": 1_000,
+                        "networkSentBytes": 2_000,
+                        "blockReadBytes": 300,
+                        "blockWrittenBytes": 400,
+                    },
+                ),
+                (
+                    12.0,
+                    {
+                        "cpuPercent": 75.0,
+                        "residentMemoryBytes": 200,
+                        "networkReceivedBytes": 1_500,
+                        "networkSentBytes": 2_750,
+                        "blockReadBytes": 350,
+                        "blockWrittenBytes": 500,
+                    },
+                ),
+            ]
+        }
+    )["contender"]
+
+    assert summary["cpuTimeSecondsEstimate"] == 1.5
+    assert summary["averageResidentMemoryBytes"] == 150
+    assert summary["peakResidentMemoryBytes"] == 200
+    assert summary["networkBytes"] == {"received": 500, "sent": 750}
+    assert summary["blockIoBytes"] == {"read": 50, "written": 100}

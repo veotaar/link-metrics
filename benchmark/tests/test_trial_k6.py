@@ -29,6 +29,8 @@ def test_registration_script_uses_open_loop_http11_keepalive() -> None:
     assert "application/json" in script
     assert "Content-Type" in script
     assert "VALIDATION_FLAGS_PATH" in script or "VALIDATION_FLAGS_JSON" in script
+    assert "isJsonContentType(contentType)" in script
+    assert script.count("unexpectedResponses.add(1)") == 1
 
 
 def test_registration_script_archives_under_pinned_k6(tmp_path: Path) -> None:

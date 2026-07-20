@@ -87,6 +87,17 @@ function isUuid(value) {
   );
 }
 
+function isJsonContentType(value) {
+  const token = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
+  const quoted = '"(?:[\\t !#-\\[\\]-~]|\\\\[\\t -~])*"';
+  const parameter = new RegExp(`^${token}\\s*=\\s*(?:${token}|${quoted})$`);
+  const parts = value.split(';');
+  return (
+    parts.shift().trim().toLowerCase() === 'application/json' &&
+    parts.every((part) => parameter.test(part.trim()))
+  );
+}
+
 export default function registration() {
   const iteration = exec.scenario.iterationInTest;
   const email = registrationEmail(iteration);
@@ -112,7 +123,7 @@ export default function registration() {
     response.headers['Content-Type'] || response.headers['content-type'] || '',
   );
   const statusOk = response.status === 201;
-  const contentTypeOk = contentType.toLowerCase().startsWith('application/json');
+  const contentTypeOk = isJsonContentType(contentType);
   // Registration success has no contract-required response headers beyond Content-Type.
   const requiredHeadersOk = contentTypeOk;
 
@@ -122,9 +133,7 @@ export default function registration() {
     'required headers present': () => requiredHeadersOk,
   });
 
-  if (!lightweight) {
-    unexpectedResponses.add(1);
-  }
+  let unexpected = !lightweight;
 
   if (shouldValidateBody(iteration)) {
     let bodyOk = false;
@@ -146,9 +155,13 @@ export default function registration() {
       'body sample matches UserResponse': () => bodyOk,
     });
     if (!validated) {
-      unexpectedResponses.add(1);
+      unexpected = true;
       bodyValidationFailures.add(1);
     }
+  }
+
+  if (unexpected) {
+    unexpectedResponses.add(1);
   }
 }
 

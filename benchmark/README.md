@@ -50,7 +50,9 @@ nonofficial registration Trial that proves scheduling, response checks, Dataset 
 bundle production without presenting the numbers as benchmark data. `trial run` executes one
 official registration Trial at a caller-supplied open-loop rate for the protocol warm and
 measure windows. Both modes require a previously built Dataset template, pin Grafana k6 by
-digest, and emit an immutable raw result bundle.
+digest, and emit an immutable raw result bundle. Bundle paths are create-only so existing
+evidence is never overwritten. Official Trials also run the conformance gate, enforce the
+local CPU and memory profile, and capture container and PostgreSQL resource telemetry.
 
 ```sh
 uv run link-metrics dataset build express-node --root ..
