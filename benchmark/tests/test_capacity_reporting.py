@@ -32,6 +32,7 @@ SEEDS = [
 def trial_bundle(
     repetition: int,
     *,
+    scenario: str = "registration",
     contender: str = "express-node",
     offered_rate: float = 100,
     achieved_iterations: int = 6_000,
@@ -49,7 +50,7 @@ def trial_bundle(
         "protocolVersion": "1.0.0",
         "datasetVersion": "1.2.0",
         "repetitionSeeds": SEEDS,
-        "scenario": "registration",
+        "scenario": scenario,
         "repetition": repetition,
         "workloadSeed": SEEDS[repetition - 1],
         "contender": {"id": contender},
@@ -158,6 +159,31 @@ def test_summary_qualifies_only_five_clean_stable_registration_trials() -> None:
     assert rate["unstable"] is False
     assert len(rate["samples"]) == 5
     assert summary["scenarios"][0]["contenders"][0]["maximumSustainableThroughput"] == 100
+
+
+@pytest.mark.parametrize(
+    ("scenario", "budget"),
+    [
+        ("registration", 1_000),
+        ("login", 1_000),
+        ("short-link-creation", 250),
+        ("uniform-resolution", 250),
+        ("viral-resolution", 250),
+        ("statistics", 250),
+    ],
+)
+def test_summary_applies_each_scenario_latency_budget(
+    scenario: str, budget: int
+) -> None:
+    bundles = [
+        trial_bundle(index, scenario=scenario, p99_ms=budget)
+        for index in range(1, 6)
+    ]
+
+    rate = summarize_trial_bundles(bundles)["scenarios"][0]["contenders"][0]["rates"][0]
+
+    assert rate["p99BudgetMs"] == budget
+    assert rate["qualified"] is True
 
 
 @pytest.mark.parametrize(
@@ -289,16 +315,18 @@ def test_capacity_sweep_records_calibration_and_five_trials_at_every_target(
         mode: str,
         repetition: int,
         offered_rate: int,
+        scenario: str,
     ) -> dict[str, Any]:
         del root
         modes.append(mode)
         calls.append((contender_id, repetition, offered_rate))
         bundle = trial_bundle(
             repetition,
+            scenario=scenario,
             contender=contender_id,
             offered_rate=offered_rate,
             achieved_iterations=offered_rate * 60,
-            p99_ms=900 if offered_rate <= 100 else 1_001,
+            p99_ms=200 if offered_rate <= 100 else 251,
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(bundle), encoding="utf-8")
@@ -307,7 +335,7 @@ def test_capacity_sweep_records_calibration_and_five_trials_at_every_target(
     raw = run_capacity_sweep(
         Path(__file__).resolve().parents[2],
         ["express-node", "hono-bun"],
-        scenario="registration",
+        scenario="statistics",
         output=output,
         trial_runner=run_trial,
     )

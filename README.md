@@ -62,6 +62,10 @@ uv run link-metrics report generate /tmp/registration-series.json \
 uv run link-metrics contenders stop express-node --root ..
 ```
 
+Replace `registration` with `login`, `short-link-creation`, `statistics`,
+`uniform-resolution`, or `viral-resolution` to calibrate and report that success-path
+Scenario independently.
+
 The control plane treats Express as opaque: it builds from `contender.yaml`, supplies the
 restricted PostgreSQL connection, and observes only the standard `/health` operation.
 

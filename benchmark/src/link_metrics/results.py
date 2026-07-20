@@ -168,14 +168,14 @@ def run_capacity_sweep(
     """Calibrate Contenders, run the official schedule, and write raw evidence."""
     if output.exists():
         raise ResultError(f"result bundle already exists: {output}")
-    if scenario != "registration":
-        raise ResultError("registration is the only implemented Scenario workload")
+    if scenario not in P99_BUDGETS_MS:
+        raise ResultError(f"unknown Scenario: {scenario}")
     if len(set(contenders)) != len(contenders):
         raise ResultError("Contender identities must be unique")
     if trial_runner is None:
-        from link_metrics.trial import run_registration_trial
+        from link_metrics.trial import run_scenario_trial
 
-        trial_runner = run_registration_trial
+        trial_runner = run_scenario_trial
 
     root = root.resolve()
     manifest = describe_dataset(root)
@@ -194,6 +194,7 @@ def run_capacity_sweep(
             trial = trial_runner(
                 root,
                 contender,
+                scenario=scenario,
                 output=trial_directory
                 / f"calibration-{contender}-{attempt_number:02d}-{rate}.json",
                 mode="calibration",
@@ -220,6 +221,7 @@ def run_capacity_sweep(
             trial = trial_runner(
                 root,
                 contender,
+                scenario=scenario,
                 output=trial_directory
                 / (
                     f"measurement-{scheduled['targetPercent']:03d}-"

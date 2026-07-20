@@ -181,11 +181,19 @@ def write_reference_tokens(
         "tokens": entries,
     }
     serialized = (json.dumps(corpus, separators=(",", ":"), sort_keys=True) + "\n").encode()
+    identities = [
+        {"shortCode": entry["shortCode"], "userId": entry["userId"]}
+        for entry in entries
+    ]
+    serialized_identities = json.dumps(
+        identities, separators=(",", ":"), sort_keys=True
+    ).encode()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(serialized)
     return {
         "count": len(entries),
         "expiresAt": corpus["expiresAt"],
+        "identitySha256": hashlib.sha256(serialized_identities).hexdigest(),
         "issuedAt": issued_at,
         "output": str(output),
         "repetition": repetition,
@@ -209,17 +217,25 @@ def sample_workload(
     access_rng = _rng(seed, "access")
     total_links = manifest["shortLinks"]["total"]
 
-    uniform_access = [_short_code(access_rng.randrange(total_links)) for _ in range(count)]
+    uniform_start = access_rng.randrange(total_links)
+    uniform_access = [
+        _short_code((uniform_start + index) % total_links) for index in range(count)
+    ]
     viral_access = []
     viral_pattern: list[bool] = []
     while len(viral_pattern) < count:
         block = [True] * 90 + [False] * 10
         access_rng.shuffle(block)
         viral_pattern.extend(block)
+    viral_tail_start = access_rng.randrange(total_links - 1)
+    viral_tail_index = 0
     for viral in viral_pattern[:count]:
-        viral_access.append(
-            _short_code(VIRAL_SHORT_CODE_INDEX if viral else access_rng.randrange(total_links))
-        )
+        if viral:
+            short_code_index = VIRAL_SHORT_CODE_INDEX
+        else:
+            short_code_index = 1 + (viral_tail_start + viral_tail_index) % (total_links - 1)
+            viral_tail_index += 1
+        viral_access.append(_short_code(short_code_index))
 
     return {
         "count": count,

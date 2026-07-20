@@ -23,3 +23,11 @@ def test_readiness_is_not_a_scored_scenario() -> None:
         "viral-resolution",
         "statistics",
     ]
+
+
+def test_complete_scenario_methodology_starts_a_new_result_series() -> None:
+    version = (
+        REPOSITORY_ROOT / "benchmark/protocol/VERSION"
+    ).read_text(encoding="utf-8").strip()
+
+    assert version == "2.0.0"

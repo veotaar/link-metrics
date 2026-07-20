@@ -26,7 +26,7 @@ from link_metrics.runtime import (
     start_contender,
     stop_contender,
 )
-from link_metrics.trial import TrialError, run_registration_trial
+from link_metrics.trial import SCENARIOS, TrialError, run_scenario_trial
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -92,7 +92,7 @@ def _parser() -> argparse.ArgumentParser:
         help="run one official registration Trial at an offered rate",
     )
     run.add_argument("contender_id")
-    run.add_argument("--scenario", required=True, choices=["registration"])
+    run.add_argument("--scenario", required=True, choices=SCENARIOS)
     run.add_argument("--rate", type=float, required=True)
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--repetition", type=int, default=1)
@@ -105,7 +105,7 @@ def _parser() -> argparse.ArgumentParser:
         help="calibrate and run the standardized official rate sweep",
     )
     capacity_run.add_argument("contender_ids", nargs="+")
-    capacity_run.add_argument("--scenario", required=True, choices=["registration"])
+    capacity_run.add_argument("--scenario", required=True, choices=SCENARIOS)
     capacity_run.add_argument("--output", type=Path, required=True)
     capacity_run.add_argument("--root", type=Path, default=Path.cwd())
 
@@ -170,17 +170,19 @@ def main(argv: list[str] | None = None) -> int:
                 args.output_dir.resolve(),
             )
         elif args.group == "trial" and args.command == "smoke":
-            output = run_registration_trial(
+            output = run_scenario_trial(
                 args.root.resolve(),
                 args.contender_id,
+                scenario="registration",
                 output=args.output.resolve(),
                 mode="smoke",
                 repetition=args.repetition,
             )
         else:
-            output = run_registration_trial(
+            output = run_scenario_trial(
                 args.root.resolve(),
                 args.contender_id,
+                scenario=args.scenario,
                 output=args.output.resolve(),
                 mode="trial",
                 repetition=args.repetition,

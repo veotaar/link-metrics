@@ -45,11 +45,13 @@ resets the fixed Trial database by verified clone plus explicit buffer prewarmin
 
 `contenders discover` scans `backends/*/contender.yaml`, validates each document against `schemas/contender.schema.json`, rejects duplicate identities, and emits deterministic JSON. `contract lint` validates the OpenAPI 3.1.2 document, its semantic version, and unique operation identifiers; the API Contract itself remains the sole authority for its operation surface.
 
-The `trial` command group owns the first performance harness. `trial smoke` runs a short
+The `trial` command group owns the performance harness. `trial smoke` runs a short
 nonofficial registration Trial that proves scheduling, response checks, Dataset reset, and
 bundle production without presenting the numbers as benchmark data. `trial run` executes one
-official registration Trial at a caller-supplied open-loop rate for the protocol warm and
-measure windows. Both modes require a previously built Dataset template, pin Grafana k6 by
+official success-path Scenario at a caller-supplied open-loop rate for the protocol warm and
+measure windows. The accepted Scenarios are `registration`, `login`, `short-link-creation`,
+`statistics`, `uniform-resolution`, and `viral-resolution`. Both modes require a previously
+built Dataset template, pin Grafana k6 by
 digest, and emit an immutable raw result bundle. Bundle paths are create-only so existing
 evidence is never overwritten. Official Trials also run the conformance gate, enforce the
 local CPU and memory profile, and capture container and PostgreSQL resource telemetry.
@@ -59,6 +61,8 @@ uv run link-metrics dataset build express-node --root ..
 uv run link-metrics trial smoke express-node --output /tmp/registration-smoke.json --root ..
 uv run link-metrics trial run express-node --scenario registration --rate 10 \
   --output /tmp/registration-trial.json --root ..
+uv run link-metrics trial run express-node --scenario statistics --rate 10 \
+  --output /tmp/statistics-trial.json --root ..
 ```
 
 The `capacity` command replaces manual rate selection for publishable measurements. It runs
@@ -72,6 +76,11 @@ the official measurement plan, and every Trial bundle.
 uv run link-metrics capacity run express-node --scenario registration \
   --output /tmp/registration-series.json --root ..
 ```
+
+Each Scenario is calibrated, qualified, and reported independently. Login and registration
+use a 1,000 ms p99 budget; creation, statistics, and resolution use 250 ms. Protected
+Scenarios cycle the seeded 10,000-User reference-token corpus. Resolution distributions are
+deterministic, and every redirect `Location` is checked against its seeded destination.
 
 Reports are regenerated from one or more comparable raw Result Series. Generation rejects
 different API Contract, protocol, Benchmark Dataset, or environment fingerprints and writes

@@ -16,6 +16,7 @@ from link_metrics.trial import (
     SMOKE_MEASURE_SECONDS,
     SMOKE_OFFERED_RATE,
     SMOKE_WARM_SECONDS,
+    SCENARIO_CONFIGURATIONS,
     TRIAL_MEASURE_SECONDS,
     TRIAL_WARM_SECONDS,
     build_validation_flags,
@@ -73,6 +74,43 @@ def test_contender_constraints_record_pool_timeouts_and_no_access_logging() -> N
     assert "Express Contender listening" in server
 
 
+def test_scenario_configurations_publish_distinct_deterministic_workloads() -> None:
+    assert SCENARIO_CONFIGURATIONS == {
+        "registration": {
+            "authentication": "none",
+            "selection": "unique-seeded-registration-identities",
+            "bodyValidation": "seeded-one-percent",
+        },
+        "login": {
+            "authentication": "seeded-credentials",
+            "selection": "seeded-user-stream",
+            "bodyValidation": "seeded-one-percent",
+        },
+        "short-link-creation": {
+            "authentication": "reference-token-corpus",
+            "selection": "all-reference-users-evenly",
+            "destinations": "byte-stable-per-iteration",
+            "shortCodes": "database-generated",
+            "bodyValidation": "seeded-one-percent",
+        },
+        "statistics": {
+            "authentication": "reference-token-corpus",
+            "selection": "owned-short-links-evenly-null-and-nonnull",
+            "bodyValidation": "seeded-one-percent",
+        },
+        "uniform-resolution": {
+            "authentication": "none",
+            "selection": "all-seeded-short-links-evenly",
+            "locationValidation": "every-response",
+        },
+        "viral-resolution": {
+            "authentication": "none",
+            "selection": "ninety-percent-viral-ten-percent-uniform",
+            "locationValidation": "every-response",
+        },
+    }
+
+
 def test_parse_k6_summary_captures_errors_and_latency() -> None:
     summary = parse_k6_summary(
         {
@@ -100,6 +138,24 @@ def test_trial_smoke_requires_an_output_path() -> None:
 def test_trial_run_requires_rate_and_output() -> None:
     result = run_trial("run", "express-node", "--scenario", "registration")
     assert result.returncode == 2
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "registration",
+        "login",
+        "short-link-creation",
+        "uniform-resolution",
+        "viral-resolution",
+        "statistics",
+    ],
+)
+def test_trial_cli_accepts_every_success_path_scenario(scenario: str) -> None:
+    result = run_trial("run", "express-node", "--scenario", scenario)
+
+    assert result.returncode == 2
+    assert "invalid choice" not in result.stderr
 
 
 @pytest.mark.skipif(

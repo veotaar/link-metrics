@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from link_metrics.conformance import run_conformance_checks
-from link_metrics.dataset import DatasetError, describe_dataset, sample_workload
+from link_metrics.dataset import (
+    DatasetError,
+    describe_dataset,
+    sample_workload,
+    write_reference_tokens,
+)
 from link_metrics.dataset_runtime import inspect_template, reset_from_template
 from link_metrics.evidence import write_immutable_json
 from link_metrics.runtime import (
@@ -42,7 +47,50 @@ K6_IMAGE = (
     "grafana/k6:1.4.2@"
     "sha256:3656673de3f30424e8ebcfa46acd9558d83b6a43612d0f668ffeac953950c6c7"
 )
-REGISTRATION_SCRIPT = Path("benchmark/protocol/k6/registration.js")
+SCENARIO_SCRIPT = Path("benchmark/protocol/k6/scenario.js")
+SCENARIOS = (
+    "registration",
+    "login",
+    "short-link-creation",
+    "uniform-resolution",
+    "viral-resolution",
+    "statistics",
+)
+PROTECTED_SCENARIOS = frozenset({"short-link-creation", "statistics"})
+SCENARIO_CONFIGURATIONS = {
+    "registration": {
+        "authentication": "none",
+        "selection": "unique-seeded-registration-identities",
+        "bodyValidation": "seeded-one-percent",
+    },
+    "login": {
+        "authentication": "seeded-credentials",
+        "selection": "seeded-user-stream",
+        "bodyValidation": "seeded-one-percent",
+    },
+    "short-link-creation": {
+        "authentication": "reference-token-corpus",
+        "selection": "all-reference-users-evenly",
+        "destinations": "byte-stable-per-iteration",
+        "shortCodes": "database-generated",
+        "bodyValidation": "seeded-one-percent",
+    },
+    "statistics": {
+        "authentication": "reference-token-corpus",
+        "selection": "owned-short-links-evenly-null-and-nonnull",
+        "bodyValidation": "seeded-one-percent",
+    },
+    "uniform-resolution": {
+        "authentication": "none",
+        "selection": "all-seeded-short-links-evenly",
+        "locationValidation": "every-response",
+    },
+    "viral-resolution": {
+        "authentication": "none",
+        "selection": "ninety-percent-viral-ten-percent-uniform",
+        "locationValidation": "every-response",
+    },
+}
 BENCHMARK_PASSWORD = "link-metrics-benchmark-only"
 
 SMOKE_WARM_SECONDS = 2
@@ -446,18 +494,21 @@ def _apply_official_resource_profile(root: Path, contender_id: str) -> None:
 def run_k6(
     root: Path,
     *,
+    scenario: str,
     contender_id: str,
     base_url: str,
     offered_rate: float,
     duration_seconds: int,
     repetition: int,
-    validation_flags: list[bool],
+    workload: dict[str, Any],
     work_dir: Path,
     official: bool = False,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Run the pinned registration script against a Contender URL."""
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    """Run the pinned Scenario script against a Contender URL."""
     root = root.resolve()
-    script = (root / REGISTRATION_SCRIPT).resolve()
+    if scenario not in SCENARIOS:
+        raise TrialError(f"unknown Scenario: {scenario}")
+    script = (root / SCENARIO_SCRIPT).resolve()
     if not script.is_file():
         raise TrialError(f"missing k6 script at {script}")
 
@@ -466,9 +517,17 @@ def run_k6(
     summary_path = work_dir / "summary.json"
     if summary_path.exists():
         summary_path.unlink()
-    flags_path = work_dir / "validation-flags.json"
-    flags_path.write_text(json.dumps(validation_flags, separators=(",", ":")), encoding="utf-8")
-    flags_path.chmod(0o644)
+    workload_path = work_dir / "workload.json"
+    workload_path.write_text(
+        json.dumps(workload, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+    workload_path.chmod(0o644)
+    token_evidence = None
+    tokens_path = work_dir / "reference-tokens.json"
+    if scenario in PROTECTED_SCENARIOS:
+        token_evidence = write_reference_tokens(root, repetition, tokens_path)
+        tokens_path.chmod(0o644)
 
     names = _resource_names(root, contender_id)
     network = names.network
@@ -522,20 +581,22 @@ def run_k6(
                 "--env",
                 f"REPETITION={repetition}",
                 "--env",
+                f"SCENARIO={scenario}",
+                "--env",
                 f"PASSWORD={BENCHMARK_PASSWORD}",
                 "--env",
                 f"PRE_ALLOCATED_VUS={pre_allocated}",
                 "--env",
                 f"MAX_VUS={max_vus}",
                 "--env",
-                "VALIDATION_FLAGS_PATH=/work/validation-flags.json",
+                "WORKLOAD_PATH=/work/workload.json",
                 "--env",
                 "SUMMARY_PATH=/work/summary.json",
-                K6_IMAGE,
-                "run",
-                "registration.js",
             ]
         )
+        if token_evidence is not None:
+            docker_arguments.extend(["--env", "TOKENS_PATH=/work/reference-tokens.json"])
+        docker_arguments.extend([K6_IMAGE, "run", script.name])
         _docker(*docker_arguments)
         actual_k6_limits = _container_limits(container)
         if official:
@@ -610,7 +671,7 @@ def run_k6(
         }, {
             role: summarized_resources[container_name]
             for role, container_name in telemetry_containers.items()
-        }
+        }, token_evidence
     finally:
         _remove_k6(root, contender_id)
 
@@ -670,19 +731,22 @@ def _ensure_fresh_contender(root: Path, contender_id: str) -> bool:
     return False
 
 
-def run_registration_trial(
+def run_scenario_trial(
     root: Path,
     contender_id: str,
     *,
+    scenario: str,
     output: Path,
     mode: str,
     repetition: int = 1,
     offered_rate: float | None = None,
 ) -> dict[str, Any]:
-    """Execute one registration Trial lifecycle and write its raw bundle."""
+    """Execute one Scenario Trial lifecycle and write its raw bundle."""
     root = root.resolve()
     if output.exists():
         raise TrialError(f"result bundle already exists: {output}")
+    if scenario not in SCENARIOS:
+        raise TrialError(f"unknown Scenario: {scenario}")
     configuration = TRIAL_MODES.get(mode)
     if configuration is None:
         raise TrialError("mode must be smoke, calibration, or trial")
@@ -723,15 +787,16 @@ def run_registration_trial(
         if official:
             conformance = run_conformance_checks(root, contender_id, base_url)
         expected_warm = max(rate * warm_seconds * 2, 100)
-        warm_flags = build_validation_flags(root, repetition=repetition, count=int(expected_warm))
+        warm_workload = sample_workload(root, repetition, int(expected_warm))
         run_k6(
             root,
+            scenario=scenario,
             contender_id=contender_id,
             base_url=base_url,
             offered_rate=rate,
             duration_seconds=warm_seconds,
             repetition=repetition,
-            validation_flags=warm_flags,
+            workload=warm_workload,
             work_dir=work_dir / "warm",
             official=uses_official_resource_profile,
         )
@@ -740,20 +805,19 @@ def run_registration_trial(
         inspect_contender(root, contender_id)
 
         expected_measure = max(rate * measure_seconds * 2, 100)
-        measure_flags = build_validation_flags(
-            root, repetition=repetition, count=int(expected_measure)
-        )
+        measure_workload = sample_workload(root, repetition, int(expected_measure))
         postgres_before = _postgres_activity_snapshot(
             _resource_names(root, contender_id).database
         )
-        summary, k6_health, resource_telemetry = run_k6(
+        summary, k6_health, resource_telemetry, token_evidence = run_k6(
             root,
+            scenario=scenario,
             contender_id=contender_id,
             base_url=base_url,
             offered_rate=rate,
             duration_seconds=measure_seconds,
             repetition=repetition,
-            validation_flags=measure_flags,
+            workload=measure_workload,
             work_dir=work_dir / "measure",
             official=uses_official_resource_profile,
         )
@@ -782,7 +846,7 @@ def run_registration_trial(
                 "datasetVersion": manifest["version"],
                 "repetitionSeeds": manifest["repetitionSeeds"],
                 "migrationVersion": _migration_version(root),
-                "scenario": "registration",
+                "scenario": scenario,
                 "repetition": repetition,
                 "workloadSeed": seed,
                 "contender": {
@@ -808,6 +872,8 @@ def run_registration_trial(
                     "offeredRate": rate,
                     "password": BENCHMARK_PASSWORD,
                     "transport": TRANSPORT,
+                    "scenarioConfiguration": SCENARIO_CONFIGURATIONS[scenario],
+                    "referenceTokens": token_evidence,
                 },
                 "results": {
                     "offeredIterations": offered_iterations,
@@ -841,3 +907,24 @@ def run_registration_trial(
             stop_contender(root, contender_id)
         else:
             _stop_contender_container(root, contender_id)
+
+
+def run_registration_trial(
+    root: Path,
+    contender_id: str,
+    *,
+    output: Path,
+    mode: str,
+    repetition: int = 1,
+    offered_rate: float | None = None,
+) -> dict[str, Any]:
+    """Compatibility wrapper for the original registration Trial seam."""
+    return run_scenario_trial(
+        root,
+        contender_id,
+        scenario="registration",
+        output=output,
+        mode=mode,
+        repetition=repetition,
+        offered_rate=offered_rate,
+    )

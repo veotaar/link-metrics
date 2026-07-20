@@ -22,7 +22,7 @@ def test_repository_exposes_versioned_authority_seams_and_local_contenders() -> 
     assert (REPOSITORY_ROOT / "backends/express-node/drizzle/schema.ts").is_file()
     assert not (REPOSITORY_ROOT / "packages/api-contract/openapi.yaml").exists()
     assert not (REPOSITORY_ROOT / "packages/db-migrations/package.json").exists()
-    assert (REPOSITORY_ROOT / "benchmark/protocol/VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
+    assert (REPOSITORY_ROOT / "benchmark/protocol/VERSION").read_text(encoding="utf-8").strip() == "2.0.0"
     assert (REPOSITORY_ROOT / "benchmark/dataset/VERSION").read_text(encoding="utf-8").strip() == "1.2.0"
 
     result = subprocess.run(

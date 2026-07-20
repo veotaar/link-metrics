@@ -79,14 +79,21 @@ def test_generates_an_identical_fresh_reference_token_corpus(tmp_path: Path) -> 
     second = run_dataset(
         "tokens", "--repetition", "1", "--issued-at", "1_800_000_000", "--output", str(second_path)
     )
+    fresh_path = tmp_path / "fresh.json"
+    fresh = run_dataset(
+        "tokens", "--repetition", "1", "--issued-at", "1_800_000_001", "--output", str(fresh_path)
+    )
 
-    assert first.returncode == second.returncode == 0, first.stderr or second.stderr
+    assert first.returncode == second.returncode == fresh.returncode == 0
     assert first_path.read_bytes() == second_path.read_bytes()
     summary = json.loads(first.stdout)
+    fresh_summary = json.loads(fresh.stdout)
     assert summary["count"] == 10_000
     assert summary["issuedAt"] == 1_800_000_000
     assert summary["expiresAt"] == 1_800_000_900
     assert summary["sha256"] == hashlib.sha256(first_path.read_bytes()).hexdigest()
+    assert summary["identitySha256"] == fresh_summary["identitySha256"]
+    assert summary["sha256"] != fresh_summary["sha256"]
 
     corpus = json.loads(first_path.read_text(encoding="utf-8"))
     assert set(corpus) == {"datasetVersion", "expiresAt", "issuedAt", "repetition", "seed", "tokens"}
@@ -147,9 +154,14 @@ def test_published_seed_reproduces_all_sampling_streams() -> None:
     assert len(samples["samples"]["access"]["uniform"]) == 12
     assert len(samples["samples"]["access"]["viral"]) == 12
 
-    viral = run_dataset("sample", "--repetition", "1", "--count", "100")
-    viral_samples = json.loads(viral.stdout)["samples"]["access"]["viral"]
+    access = run_dataset("sample", "--repetition", "1", "--count", "100")
+    access_samples = json.loads(access.stdout)["samples"]["access"]
+    uniform_samples = access_samples["uniform"]
+    viral_samples = access_samples["viral"]
+
+    assert len(set(uniform_samples)) == 100
     assert viral_samples.count("00000001") == 90
+    assert len(set(code for code in viral_samples if code != "00000001")) == 10
 
 
 def test_template_commands_require_a_running_control_plane_database() -> None:
