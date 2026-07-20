@@ -24,6 +24,7 @@ from link_metrics.runtime import (
     start_contender,
     stop_contender,
 )
+from link_metrics.trial import TrialError, run_registration_trial
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -73,6 +74,27 @@ def _parser() -> argparse.ArgumentParser:
         template_command.add_argument("--root", type=Path, default=Path.cwd())
         if command == "reset":
             template_command.add_argument("--expected-checksum")
+
+    trial = groups.add_parser("trial", help="run performance Trials")
+    trial_commands = trial.add_subparsers(dest="command", required=True)
+    smoke = trial_commands.add_parser(
+        "smoke",
+        help="run a short nonofficial registration smoke Trial",
+    )
+    smoke.add_argument("contender_id")
+    smoke.add_argument("--output", type=Path, required=True)
+    smoke.add_argument("--repetition", type=int, default=1)
+    smoke.add_argument("--root", type=Path, default=Path.cwd())
+    run = trial_commands.add_parser(
+        "run",
+        help="run one official registration Trial at an offered rate",
+    )
+    run.add_argument("contender_id")
+    run.add_argument("--scenario", required=True, choices=["registration"])
+    run.add_argument("--rate", type=int, required=True)
+    run.add_argument("--output", type=Path, required=True)
+    run.add_argument("--repetition", type=int, default=1)
+    run.add_argument("--root", type=Path, default=Path.cwd())
     return parser
 
 
@@ -109,9 +131,26 @@ def main(argv: list[str] | None = None) -> int:
             output = build_template(args.root.resolve(), args.contender_id)
         elif args.group == "dataset" and args.command == "inspect":
             output = inspect_template(args.root.resolve(), args.contender_id)
-        else:
+        elif args.group == "dataset" and args.command == "reset":
             output = reset_from_template(
                 args.root.resolve(), args.contender_id, args.expected_checksum
+            )
+        elif args.group == "trial" and args.command == "smoke":
+            output = run_registration_trial(
+                args.root.resolve(),
+                args.contender_id,
+                output=args.output.resolve(),
+                mode="smoke",
+                repetition=args.repetition,
+            )
+        else:
+            output = run_registration_trial(
+                args.root.resolve(),
+                args.contender_id,
+                output=args.output.resolve(),
+                mode="trial",
+                repetition=args.repetition,
+                offered_rate=args.rate,
             )
     except (
         ConformanceError,
@@ -119,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         ContenderRuntimeError,
         ContractLintError,
         DatasetError,
+        TrialError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

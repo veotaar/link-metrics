@@ -45,6 +45,22 @@ resets the fixed Trial database by verified clone plus explicit buffer prewarmin
 
 `contenders discover` scans `backends/*/contender.yaml`, validates each document against `schemas/contender.schema.json`, rejects duplicate identities, and emits deterministic JSON. `contract lint` validates the OpenAPI 3.1.2 document, its semantic version, and unique operation identifiers; the API Contract itself remains the sole authority for its operation surface.
 
+The `trial` command group owns the first performance harness. `trial smoke` runs a short
+nonofficial registration Trial that proves scheduling, response checks, Dataset reset, and
+bundle production without presenting the numbers as benchmark data. `trial run` executes one
+official registration Trial at a caller-supplied open-loop rate for the protocol warm and
+measure windows. Both modes require a previously built Dataset template, pin Grafana k6 by
+digest, and emit an immutable raw result bundle.
+
+```sh
+uv run link-metrics dataset build express-node --root ..
+uv run link-metrics trial smoke express-node --output /tmp/registration-smoke.json --root ..
+uv run link-metrics trial run express-node --scenario registration --rate 10 \
+  --output /tmp/registration-trial.json --root ..
+```
+
+End-to-end smoke coverage is opt-in: `LINK_METRICS_TEST_TRIAL=1 uv run pytest tests/test_trial_lifecycle.py`.
+
 The lockfile is committed. Change dependencies with `uv add` or `uv remove`, and verify installation with `uv sync --locked`. Pytest and Schemathesis are pinned together as the conformance toolchain.
 
 Container startup also requires dbmate `2.34.1`; the control plane invokes that exact
