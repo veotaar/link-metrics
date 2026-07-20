@@ -61,6 +61,29 @@ uv run link-metrics trial run express-node --scenario registration --rate 10 \
   --output /tmp/registration-trial.json --root ..
 ```
 
+The `capacity` command replaces manual rate selection for publishable measurements. It runs
+unreported calibration Trials, doubling the offered rate and then binary-searching the
+passing/failing bracket, before scheduling five seeded Trials at 25%, 50%, 75%, 90%, 100%,
+and 110% of each Contender's boundary. Contender order is deterministically randomized for
+each rate and repetition. The create-only raw Result Series retains calibration evidence,
+the official measurement plan, and every Trial bundle.
+
+```sh
+uv run link-metrics capacity run express-node --scenario registration \
+  --output /tmp/registration-series.json --root ..
+```
+
+Reports are regenerated from one or more comparable raw Result Series. Generation rejects
+different API Contract, protocol, Benchmark Dataset, or environment fingerprints and writes
+a compact JSON summary plus deterministic Markdown and HTML. Each rate includes every sample,
+median, exact 95% bootstrap interval, coefficient of variation, instability, qualification
+reasons, and the per-Scenario maximum sustainable throughput.
+
+```sh
+uv run link-metrics report generate /tmp/registration-series.json \
+  --output-dir /tmp/registration-report
+```
+
 End-to-end smoke coverage is opt-in: `LINK_METRICS_TEST_TRIAL=1 uv run pytest tests/test_trial_lifecycle.py`.
 
 The lockfile is committed. Change dependencies with `uv add` or `uv remove`, and verify installation with `uv sync --locked`. Pytest and Schemathesis are pinned together as the conformance toolchain.

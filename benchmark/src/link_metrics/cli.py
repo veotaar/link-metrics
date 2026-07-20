@@ -17,6 +17,8 @@ from link_metrics.dataset import (
     write_reference_tokens,
 )
 from link_metrics.dataset_runtime import build_template, inspect_template, reset_from_template
+from link_metrics.reporting import write_reports
+from link_metrics.results import ResultError, run_capacity_sweep
 from link_metrics.runtime import (
     ContenderRuntimeError,
     database_owner_connection,
@@ -91,10 +93,30 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("contender_id")
     run.add_argument("--scenario", required=True, choices=["registration"])
-    run.add_argument("--rate", type=int, required=True)
+    run.add_argument("--rate", type=float, required=True)
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--repetition", type=int, default=1)
     run.add_argument("--root", type=Path, default=Path.cwd())
+
+    capacity = groups.add_parser("capacity", help="discover and measure Scenario capacity")
+    capacity_commands = capacity.add_subparsers(dest="command", required=True)
+    capacity_run = capacity_commands.add_parser(
+        "run",
+        help="calibrate and run the standardized official rate sweep",
+    )
+    capacity_run.add_argument("contender_ids", nargs="+")
+    capacity_run.add_argument("--scenario", required=True, choices=["registration"])
+    capacity_run.add_argument("--output", type=Path, required=True)
+    capacity_run.add_argument("--root", type=Path, default=Path.cwd())
+
+    report = groups.add_parser("report", help="regenerate Result Series reports")
+    report_commands = report.add_subparsers(dest="command", required=True)
+    generate = report_commands.add_parser(
+        "generate",
+        help="generate compact JSON, Markdown, and HTML from raw bundles",
+    )
+    generate.add_argument("raw_bundles", nargs="+", type=Path)
+    generate.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
@@ -135,6 +157,18 @@ def main(argv: list[str] | None = None) -> int:
             output = reset_from_template(
                 args.root.resolve(), args.contender_id, args.expected_checksum
             )
+        elif args.group == "capacity":
+            output = run_capacity_sweep(
+                args.root.resolve(),
+                args.contender_ids,
+                scenario=args.scenario,
+                output=args.output.resolve(),
+            )
+        elif args.group == "report":
+            output = write_reports(
+                [path.resolve() for path in args.raw_bundles],
+                args.output_dir.resolve(),
+            )
         elif args.group == "trial" and args.command == "smoke":
             output = run_registration_trial(
                 args.root.resolve(),
@@ -158,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         ContenderRuntimeError,
         ContractLintError,
         DatasetError,
+        ResultError,
         TrialError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)

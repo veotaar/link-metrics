@@ -55,6 +55,10 @@ uv run link-metrics contenders inspect express-node --root ..
 uv run link-metrics dataset build express-node --root ..
 uv run link-metrics dataset reset express-node --root ..
 uv run link-metrics trial smoke express-node --output /tmp/registration-smoke.json --root ..
+uv run link-metrics capacity run express-node --scenario registration \
+  --output /tmp/registration-series.json --root ..
+uv run link-metrics report generate /tmp/registration-series.json \
+  --output-dir /tmp/registration-report
 uv run link-metrics contenders stop express-node --root ..
 ```
 

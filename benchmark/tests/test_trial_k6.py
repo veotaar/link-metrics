@@ -21,8 +21,10 @@ def test_registration_script_uses_open_loop_http11_keepalive() -> None:
     script = (REPOSITORY_ROOT / REGISTRATION_SCRIPT).read_text(encoding="utf-8")
 
     assert "constant-arrival-rate" in script
+    assert "Math.round(offeredRate * rateScale)" in script
+    assert "timeUnit: `${rateScale}s`" in script
     assert "dropped_iterations" in script
-    assert "timeout: '5s'" in script
+    assert 'timeout: "5s"' in script
     assert "noConnectionReuse: false" in script
     assert "/api/auth/register" in script
     assert "link-metrics-benchmark-only" in script

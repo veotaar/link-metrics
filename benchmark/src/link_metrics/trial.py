@@ -8,12 +8,14 @@ import platform
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from link_metrics.conformance import run_conformance_checks
 from link_metrics.dataset import DatasetError, describe_dataset, sample_workload
 from link_metrics.dataset_runtime import inspect_template, reset_from_template
+from link_metrics.evidence import write_immutable_json
 from link_metrics.runtime import (
     CONTROL_ROLE,
     CONTENDER_PASSWORD,
@@ -48,6 +50,38 @@ SMOKE_MEASURE_SECONDS = 5
 SMOKE_OFFERED_RATE = 2
 TRIAL_WARM_SECONDS = 30
 TRIAL_MEASURE_SECONDS = 60
+
+
+@dataclass(frozen=True)
+class TrialMode:
+    warm_seconds: int
+    measure_seconds: int
+    official: bool
+    uses_official_resource_profile: bool
+    fixed_rate: float | None = None
+
+
+TRIAL_MODES = {
+    "smoke": TrialMode(
+        warm_seconds=SMOKE_WARM_SECONDS,
+        measure_seconds=SMOKE_MEASURE_SECONDS,
+        official=False,
+        uses_official_resource_profile=False,
+        fixed_rate=SMOKE_OFFERED_RATE,
+    ),
+    "calibration": TrialMode(
+        warm_seconds=TRIAL_WARM_SECONDS,
+        measure_seconds=TRIAL_MEASURE_SECONDS,
+        official=False,
+        uses_official_resource_profile=True,
+    ),
+    "trial": TrialMode(
+        warm_seconds=TRIAL_WARM_SECONDS,
+        measure_seconds=TRIAL_MEASURE_SECONDS,
+        official=True,
+        uses_official_resource_profile=True,
+    ),
+}
 
 CONTENDER_CONSTRAINTS = {
     "maxPoolConnections": 20,
@@ -100,27 +134,17 @@ def write_result_bundle(output: Path, payload: dict[str, Any]) -> dict[str, Any]
     """Persist an immutable machine-readable Trial bundle."""
     official = bool(payload.get("official"))
     mode = payload.get("mode")
-    if mode == "smoke" and official:
-        raise TrialError("smoke Trial bundles must be nonofficial")
-    if mode not in {"smoke", "trial"}:
-        raise TrialError("mode must be smoke or trial")
+    configuration = TRIAL_MODES.get(str(mode))
+    if configuration is None:
+        raise TrialError("mode must be smoke, calibration, or trial")
+    if official and not configuration.official:
+        raise TrialError(f"{mode} Trial bundles must be nonofficial")
 
     bundle = {"schemaVersion": 1, **payload}
-    serialized = json.dumps(bundle, indent=2, sort_keys=True) + "\n"
-    output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        return write_immutable_json(output, bundle)
     except FileExistsError as error:
         raise TrialError(f"result bundle already exists: {output}") from error
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(serialized)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        output.unlink(missing_ok=True)
-        raise
-    return json.loads(serialized)
 
 
 def build_validation_flags(root: Path, *, repetition: int, count: int) -> list[bool]:
@@ -424,7 +448,7 @@ def run_k6(
     *,
     contender_id: str,
     base_url: str,
-    offered_rate: int,
+    offered_rate: float,
     duration_seconds: int,
     repetition: int,
     validation_flags: list[bool],
@@ -653,26 +677,25 @@ def run_registration_trial(
     output: Path,
     mode: str,
     repetition: int = 1,
-    offered_rate: int | None = None,
+    offered_rate: float | None = None,
 ) -> dict[str, Any]:
     """Execute one registration Trial lifecycle and write its raw bundle."""
     root = root.resolve()
     if output.exists():
         raise TrialError(f"result bundle already exists: {output}")
-    if mode not in {"smoke", "trial"}:
-        raise TrialError("mode must be smoke or trial")
-    if mode == "smoke":
-        warm_seconds = SMOKE_WARM_SECONDS
-        measure_seconds = SMOKE_MEASURE_SECONDS
-        rate = SMOKE_OFFERED_RATE
-        official = False
-    else:
-        warm_seconds = TRIAL_WARM_SECONDS
-        measure_seconds = TRIAL_MEASURE_SECONDS
-        if offered_rate is None or offered_rate < 1:
-            raise TrialError("trial mode requires a positive --rate")
+    configuration = TRIAL_MODES.get(mode)
+    if configuration is None:
+        raise TrialError("mode must be smoke, calibration, or trial")
+    if configuration.fixed_rate is None:
+        if offered_rate is None or offered_rate <= 0:
+            raise TrialError(f"{mode} mode requires a positive offered rate")
         rate = offered_rate
-        official = True
+    else:
+        rate = configuration.fixed_rate
+    warm_seconds = configuration.warm_seconds
+    measure_seconds = configuration.measure_seconds
+    official = configuration.official
+    uses_official_resource_profile = configuration.uses_official_resource_profile
 
     contender = _find_manifest(root, contender_id)
     manifest = describe_dataset(root)
@@ -695,8 +718,9 @@ def run_registration_trial(
 
         base_url = _contender_base_url(root, contender_id)
         conformance = None
-        if official:
+        if uses_official_resource_profile:
             _apply_official_resource_profile(root, contender_id)
+        if official:
             conformance = run_conformance_checks(root, contender_id, base_url)
         expected_warm = max(rate * warm_seconds * 2, 100)
         warm_flags = build_validation_flags(root, repetition=repetition, count=int(expected_warm))
@@ -709,7 +733,7 @@ def run_registration_trial(
             repetition=repetition,
             validation_flags=warm_flags,
             work_dir=work_dir / "warm",
-            official=official,
+            official=uses_official_resource_profile,
         )
 
         reset = reset_from_template(root, contender_id, template["templateChecksum"])
@@ -731,7 +755,7 @@ def run_registration_trial(
             repetition=repetition,
             validation_flags=measure_flags,
             work_dir=work_dir / "measure",
-            official=official,
+            official=uses_official_resource_profile,
         )
         postgres_after = _postgres_activity_snapshot(
             _resource_names(root, contender_id).database
@@ -756,6 +780,7 @@ def run_registration_trial(
                 "protocolVersion": _protocol_version(root),
                 "apiContractVersion": _api_contract_version(root),
                 "datasetVersion": manifest["version"],
+                "repetitionSeeds": manifest["repetitionSeeds"],
                 "migrationVersion": _migration_version(root),
                 "scenario": "registration",
                 "repetition": repetition,
