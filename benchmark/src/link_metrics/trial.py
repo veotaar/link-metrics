@@ -15,6 +15,7 @@ from typing import Any
 from link_metrics.conformance import run_conformance_checks
 from link_metrics.dataset import (
     DatasetError,
+    REFERENCE_TOKEN_MIN_VALIDITY_SECONDS,
     ReferenceTokenCorpus,
     build_reference_token_corpus,
     describe_dataset,
@@ -739,9 +740,13 @@ def run_scenario_trial(
 
     work_dir = output.parent / f".trial-work-{contender_id}-{mode}"
     if scenario in PROTECTED_SCENARIOS:
-        reference_tokens = reference_tokens or build_reference_token_corpus(
-            root, repetition
-        )
+        if (
+            reference_tokens is None
+            or reference_tokens.evidence["repetition"] != repetition
+            or reference_tokens.evidence["expiresAt"]
+            <= int(time.time()) + REFERENCE_TOKEN_MIN_VALIDITY_SECONDS
+        ):
+            reference_tokens = build_reference_token_corpus(root, repetition)
     elif reference_tokens is not None:
         raise TrialError(f"{scenario} does not use reference tokens")
     owns_stack = False

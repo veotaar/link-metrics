@@ -371,6 +371,12 @@ def test_capacity_sweep_records_calibration_and_five_trials_at_every_target(
     assert calls[0][:2] == ("express-node", 1)
     assert modes[0] == "calibration"
     assert modes[-1] == "trial"
+    calibration_corpora = [
+        corpus
+        for corpus, mode in zip(reference_corpora, modes, strict=True)
+        if mode == "calibration"
+    ]
+    assert all(corpus is calibration_corpora[0] for corpus in calibration_corpora)
     official_corpora = [
         corpus
         for corpus, mode in zip(reference_corpora, modes, strict=True)

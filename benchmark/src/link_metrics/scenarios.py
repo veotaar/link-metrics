@@ -5,11 +5,13 @@ SCENARIO_CONFIGURATIONS = {
         "authentication": "none",
         "selection": "unique-seeded-registration-identities",
         "bodyValidation": "seeded-one-percent",
+        "p99BudgetMs": 1_000,
     },
     "login": {
         "authentication": "seeded-credentials",
         "selection": "seeded-user-stream",
         "bodyValidation": "seeded-one-percent",
+        "p99BudgetMs": 1_000,
     },
     "short-link-creation": {
         "authentication": "reference-token-corpus",
@@ -17,21 +19,25 @@ SCENARIO_CONFIGURATIONS = {
         "destinations": "byte-stable-per-iteration",
         "shortCodes": "database-generated",
         "bodyValidation": "seeded-one-percent",
+        "p99BudgetMs": 250,
     },
     "uniform-resolution": {
         "authentication": "none",
         "selection": "all-seeded-short-links-evenly",
         "locationValidation": "every-response",
+        "p99BudgetMs": 250,
     },
     "viral-resolution": {
         "authentication": "none",
         "selection": "ninety-percent-viral-ten-percent-uniform",
         "locationValidation": "every-response",
+        "p99BudgetMs": 250,
     },
     "statistics": {
         "authentication": "reference-token-corpus",
         "selection": "owned-short-links-evenly-null-and-nonnull",
         "bodyValidation": "seeded-one-percent",
+        "p99BudgetMs": 250,
     },
 }
 
@@ -42,13 +48,6 @@ PROTECTED_SCENARIOS = frozenset(
     if configuration["authentication"] == "reference-token-corpus"
 )
 P99_BUDGETS_MS = {
-    "registration": 1_000,
-    "login": 1_000,
-    "short-link-creation": 250,
-    "uniform-resolution": 250,
-    "viral-resolution": 250,
-    "statistics": 250,
+    scenario: int(configuration["p99BudgetMs"])
+    for scenario, configuration in SCENARIO_CONFIGURATIONS.items()
 }
-
-if set(SCENARIOS) != set(P99_BUDGETS_MS):
-    raise RuntimeError("every Scenario requires exactly one p99 latency budget")

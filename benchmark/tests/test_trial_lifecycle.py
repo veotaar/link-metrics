@@ -80,11 +80,13 @@ def test_scenario_configurations_publish_distinct_deterministic_workloads() -> N
             "authentication": "none",
             "selection": "unique-seeded-registration-identities",
             "bodyValidation": "seeded-one-percent",
+            "p99BudgetMs": 1_000,
         },
         "login": {
             "authentication": "seeded-credentials",
             "selection": "seeded-user-stream",
             "bodyValidation": "seeded-one-percent",
+            "p99BudgetMs": 1_000,
         },
         "short-link-creation": {
             "authentication": "reference-token-corpus",
@@ -92,21 +94,25 @@ def test_scenario_configurations_publish_distinct_deterministic_workloads() -> N
             "destinations": "byte-stable-per-iteration",
             "shortCodes": "database-generated",
             "bodyValidation": "seeded-one-percent",
+            "p99BudgetMs": 250,
         },
         "statistics": {
             "authentication": "reference-token-corpus",
             "selection": "owned-short-links-evenly-null-and-nonnull",
             "bodyValidation": "seeded-one-percent",
+            "p99BudgetMs": 250,
         },
         "uniform-resolution": {
             "authentication": "none",
             "selection": "all-seeded-short-links-evenly",
             "locationValidation": "every-response",
+            "p99BudgetMs": 250,
         },
         "viral-resolution": {
             "authentication": "none",
             "selection": "ninety-percent-viral-ten-percent-uniform",
             "locationValidation": "every-response",
+            "p99BudgetMs": 250,
         },
     }
 

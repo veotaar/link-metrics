@@ -8,11 +8,17 @@ import json
 import math
 import random
 import statistics
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from link_metrics.dataset import build_reference_token_corpus, describe_dataset
+from link_metrics.dataset import (
+    REFERENCE_TOKEN_MIN_VALIDITY_SECONDS,
+    ReferenceTokenCorpus,
+    build_reference_token_corpus,
+    describe_dataset,
+)
 from link_metrics.evidence import write_immutable_json
 from link_metrics.scenarios import P99_BUDGETS_MS, PROTECTED_SCENARIOS
 
@@ -174,6 +180,22 @@ def run_capacity_sweep(
     manifest = describe_dataset(root)
     repetition_seeds = [int(seed) for seed in manifest["repetitionSeeds"]]
     trial_directory = output.parent / f"{output.stem}.trials"
+    reference_tokens: ReferenceTokenCorpus | None = None
+
+    def fresh_reference_tokens(repetition: int) -> ReferenceTokenCorpus | None:
+        nonlocal reference_tokens
+        if scenario not in PROTECTED_SCENARIOS:
+            return None
+        now = int(time.time())
+        if (
+            reference_tokens is None
+            or reference_tokens.evidence["repetition"] != repetition
+            or reference_tokens.evidence["expiresAt"]
+            <= now + REFERENCE_TOKEN_MIN_VALIDITY_SECONDS
+        ):
+            reference_tokens = build_reference_token_corpus(root, repetition, now)
+        return reference_tokens
+
     calibrations: dict[str, Any] = {}
     boundaries: dict[str, float] = {}
     all_trials: list[dict[str, Any]] = []
@@ -193,6 +215,7 @@ def run_capacity_sweep(
                 mode="calibration",
                 repetition=1,
                 offered_rate=rate,
+                reference_tokens=fresh_reference_tokens(1),
             )
             all_trials.append(trial)
             return trial
@@ -209,14 +232,6 @@ def run_capacity_sweep(
     )
     measurements: list[dict[str, Any]] = []
     for scheduled in plan:
-        reference_tokens = (
-            build_reference_token_corpus(
-                root,
-                int(scheduled["repetition"]),
-            )
-            if scenario in PROTECTED_SCENARIOS
-            else None
-        )
         for contender in scheduled["contenders"]:
             rate = float(scheduled["offeredRates"][contender])
             trial = trial_runner(
@@ -231,7 +246,9 @@ def run_capacity_sweep(
                 mode="trial",
                 repetition=int(scheduled["repetition"]),
                 offered_rate=rate,
-                reference_tokens=reference_tokens,
+                reference_tokens=fresh_reference_tokens(
+                    int(scheduled["repetition"])
+                ),
             )
             all_trials.append(trial)
             measurement = json.loads(json.dumps(trial))
