@@ -15,12 +15,18 @@ from typing import Any
 from link_metrics.conformance import run_conformance_checks
 from link_metrics.dataset import (
     DatasetError,
+    ReferenceTokenCorpus,
+    build_reference_token_corpus,
     describe_dataset,
     sample_workload,
-    write_reference_tokens,
 )
 from link_metrics.dataset_runtime import inspect_template, reset_from_template
 from link_metrics.evidence import write_immutable_json
+from link_metrics.scenarios import (
+    PROTECTED_SCENARIOS,
+    SCENARIO_CONFIGURATIONS,
+    SCENARIOS,
+)
 from link_metrics.runtime import (
     CONTROL_ROLE,
     CONTENDER_PASSWORD,
@@ -48,49 +54,6 @@ K6_IMAGE = (
     "sha256:3656673de3f30424e8ebcfa46acd9558d83b6a43612d0f668ffeac953950c6c7"
 )
 SCENARIO_SCRIPT = Path("benchmark/protocol/k6/scenario.js")
-SCENARIOS = (
-    "registration",
-    "login",
-    "short-link-creation",
-    "uniform-resolution",
-    "viral-resolution",
-    "statistics",
-)
-PROTECTED_SCENARIOS = frozenset({"short-link-creation", "statistics"})
-SCENARIO_CONFIGURATIONS = {
-    "registration": {
-        "authentication": "none",
-        "selection": "unique-seeded-registration-identities",
-        "bodyValidation": "seeded-one-percent",
-    },
-    "login": {
-        "authentication": "seeded-credentials",
-        "selection": "seeded-user-stream",
-        "bodyValidation": "seeded-one-percent",
-    },
-    "short-link-creation": {
-        "authentication": "reference-token-corpus",
-        "selection": "all-reference-users-evenly",
-        "destinations": "byte-stable-per-iteration",
-        "shortCodes": "database-generated",
-        "bodyValidation": "seeded-one-percent",
-    },
-    "statistics": {
-        "authentication": "reference-token-corpus",
-        "selection": "owned-short-links-evenly-null-and-nonnull",
-        "bodyValidation": "seeded-one-percent",
-    },
-    "uniform-resolution": {
-        "authentication": "none",
-        "selection": "all-seeded-short-links-evenly",
-        "locationValidation": "every-response",
-    },
-    "viral-resolution": {
-        "authentication": "none",
-        "selection": "ninety-percent-viral-ten-percent-uniform",
-        "locationValidation": "every-response",
-    },
-}
 BENCHMARK_PASSWORD = "link-metrics-benchmark-only"
 
 SMOKE_WARM_SECONDS = 2
@@ -501,6 +464,7 @@ def run_k6(
     duration_seconds: int,
     repetition: int,
     workload: dict[str, Any],
+    reference_tokens: ReferenceTokenCorpus | None,
     work_dir: Path,
     official: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None]:
@@ -508,6 +472,10 @@ def run_k6(
     root = root.resolve()
     if scenario not in SCENARIOS:
         raise TrialError(f"unknown Scenario: {scenario}")
+    if scenario in PROTECTED_SCENARIOS and reference_tokens is None:
+        raise TrialError(f"{scenario} requires a reference-token corpus")
+    if scenario not in PROTECTED_SCENARIOS and reference_tokens is not None:
+        raise TrialError(f"{scenario} does not use reference tokens")
     script = (root / SCENARIO_SCRIPT).resolve()
     if not script.is_file():
         raise TrialError(f"missing k6 script at {script}")
@@ -523,10 +491,9 @@ def run_k6(
         encoding="utf-8",
     )
     workload_path.chmod(0o644)
-    token_evidence = None
     tokens_path = work_dir / "reference-tokens.json"
-    if scenario in PROTECTED_SCENARIOS:
-        token_evidence = write_reference_tokens(root, repetition, tokens_path)
+    if reference_tokens is not None:
+        tokens_path.write_bytes(reference_tokens.serialized)
         tokens_path.chmod(0o644)
 
     names = _resource_names(root, contender_id)
@@ -594,7 +561,7 @@ def run_k6(
                 "SUMMARY_PATH=/work/summary.json",
             ]
         )
-        if token_evidence is not None:
+        if reference_tokens is not None:
             docker_arguments.extend(["--env", "TOKENS_PATH=/work/reference-tokens.json"])
         docker_arguments.extend([K6_IMAGE, "run", script.name])
         _docker(*docker_arguments)
@@ -671,7 +638,7 @@ def run_k6(
         }, {
             role: summarized_resources[container_name]
             for role, container_name in telemetry_containers.items()
-        }, token_evidence
+        }, reference_tokens.evidence if reference_tokens is not None else None
     finally:
         _remove_k6(root, contender_id)
 
@@ -740,6 +707,7 @@ def run_scenario_trial(
     mode: str,
     repetition: int = 1,
     offered_rate: float | None = None,
+    reference_tokens: ReferenceTokenCorpus | None = None,
 ) -> dict[str, Any]:
     """Execute one Scenario Trial lifecycle and write its raw bundle."""
     root = root.resolve()
@@ -770,6 +738,12 @@ def run_scenario_trial(
     seed = int(manifest["repetitionSeeds"][repetition - 1])
 
     work_dir = output.parent / f".trial-work-{contender_id}-{mode}"
+    if scenario in PROTECTED_SCENARIOS:
+        reference_tokens = reference_tokens or build_reference_token_corpus(
+            root, repetition
+        )
+    elif reference_tokens is not None:
+        raise TrialError(f"{scenario} does not use reference tokens")
     owns_stack = False
     try:
         owns_stack = _ensure_fresh_contender(root, contender_id)
@@ -797,6 +771,7 @@ def run_scenario_trial(
             duration_seconds=warm_seconds,
             repetition=repetition,
             workload=warm_workload,
+            reference_tokens=reference_tokens,
             work_dir=work_dir / "warm",
             official=uses_official_resource_profile,
         )
@@ -818,6 +793,7 @@ def run_scenario_trial(
             duration_seconds=measure_seconds,
             repetition=repetition,
             workload=measure_workload,
+            reference_tokens=reference_tokens,
             work_dir=work_dir / "measure",
             official=uses_official_resource_profile,
         )
@@ -907,24 +883,3 @@ def run_scenario_trial(
             stop_contender(root, contender_id)
         else:
             _stop_contender_container(root, contender_id)
-
-
-def run_registration_trial(
-    root: Path,
-    contender_id: str,
-    *,
-    output: Path,
-    mode: str,
-    repetition: int = 1,
-    offered_rate: float | None = None,
-) -> dict[str, Any]:
-    """Compatibility wrapper for the original registration Trial seam."""
-    return run_scenario_trial(
-        root,
-        contender_id,
-        scenario="registration",
-        output=output,
-        mode=mode,
-        repetition=repetition,
-        offered_rate=offered_rate,
-    )

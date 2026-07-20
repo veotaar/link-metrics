@@ -12,9 +12,10 @@ resolution. Login selects seeded credentials. Protected Scenarios cycle the same
 never-clicked and clicked Short Links. Creation submits byte-stable destinations and leaves
 Short Code generation to PostgreSQL.
 
-Uniform resolution walks the seeded Short Links evenly from a repetition-seeded offset.
-Viral resolution assigns exactly 90% of each 100-request block to one Short Code and walks
-the remaining 10% evenly across the rest. Every resolution checks the `Location` header
-byte-for-byte; JSON response bodies use the independent seeded one-percent validation stream.
+Uniform resolution uses a repetition-seeded full-population permutation so every seeded
+Short Link is selected once before any repeats. Viral resolution assigns exactly 90% of
+each 100-request block to one Short Code and uses a separate full-population permutation
+for the remaining 10%. Every resolution checks the `Location` header byte-for-byte; JSON
+response bodies use the independent seeded one-percent validation stream.
 Login and registration have a 1,000 ms p99 budget. Creation, statistics, and both resolution
 Scenarios have a 250 ms p99 budget.

@@ -306,6 +306,7 @@ def test_capacity_sweep_records_calibration_and_five_trials_at_every_target(
     output = tmp_path / "raw-series.json"
     calls: list[tuple[str, int, int]] = []
     modes: list[str] = []
+    reference_corpora: list[object | None] = []
 
     def run_trial(
         root: Path,
@@ -316,10 +317,12 @@ def test_capacity_sweep_records_calibration_and_five_trials_at_every_target(
         repetition: int,
         offered_rate: int,
         scenario: str,
+        reference_tokens: object | None = None,
     ) -> dict[str, Any]:
         del root
         modes.append(mode)
         calls.append((contender_id, repetition, offered_rate))
+        reference_corpora.append(reference_tokens)
         bundle = trial_bundle(
             repetition,
             scenario=scenario,
@@ -368,6 +371,16 @@ def test_capacity_sweep_records_calibration_and_five_trials_at_every_target(
     assert calls[0][:2] == ("express-node", 1)
     assert modes[0] == "calibration"
     assert modes[-1] == "trial"
+    official_corpora = [
+        corpus
+        for corpus, mode in zip(reference_corpora, modes, strict=True)
+        if mode == "trial"
+    ]
+    assert all(corpus is not None for corpus in official_corpora)
+    assert all(
+        official_corpora[index] is official_corpora[index + 1]
+        for index in range(0, len(official_corpora), 2)
+    )
 
 
 def test_capacity_sweep_refuses_to_overwrite_raw_evidence(tmp_path: Path) -> None:

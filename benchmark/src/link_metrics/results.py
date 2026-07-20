@@ -12,19 +12,12 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from link_metrics.dataset import describe_dataset
+from link_metrics.dataset import build_reference_token_corpus, describe_dataset
 from link_metrics.evidence import write_immutable_json
+from link_metrics.scenarios import P99_BUDGETS_MS, PROTECTED_SCENARIOS
 
 
 TARGET_PERCENTAGES = (25, 50, 75, 90, 100, 110)
-P99_BUDGETS_MS = {
-    "registration": 1_000,
-    "login": 1_000,
-    "short-link-creation": 250,
-    "uniform-resolution": 250,
-    "viral-resolution": 250,
-    "statistics": 250,
-}
 
 
 class ResultError(Exception):
@@ -216,6 +209,14 @@ def run_capacity_sweep(
     )
     measurements: list[dict[str, Any]] = []
     for scheduled in plan:
+        reference_tokens = (
+            build_reference_token_corpus(
+                root,
+                int(scheduled["repetition"]),
+            )
+            if scenario in PROTECTED_SCENARIOS
+            else None
+        )
         for contender in scheduled["contenders"]:
             rate = float(scheduled["offeredRates"][contender])
             trial = trial_runner(
@@ -230,6 +231,7 @@ def run_capacity_sweep(
                 mode="trial",
                 repetition=int(scheduled["repetition"]),
                 offered_rate=rate,
+                reference_tokens=reference_tokens,
             )
             all_trials.append(trial)
             measurement = json.loads(json.dumps(trial))

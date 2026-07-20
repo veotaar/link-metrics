@@ -160,8 +160,16 @@ def test_published_seed_reproduces_all_sampling_streams() -> None:
     viral_samples = access_samples["viral"]
 
     assert len(set(uniform_samples)) == 100
+    uniform_indexes = [short_code_index(code) for code in uniform_samples]
+    assert max(uniform_indexes) - min(uniform_indexes) > 500_000
     assert viral_samples.count("00000001") == 90
-    assert len(set(code for code in viral_samples if code != "00000001")) == 10
+    viral_tail = [
+        short_code_index(code)
+        for code in viral_samples
+        if code != "00000001"
+    ]
+    assert len(set(viral_tail)) == 10
+    assert max(viral_tail) - min(viral_tail) > 500_000
 
 
 def test_template_commands_require_a_running_control_plane_database() -> None:

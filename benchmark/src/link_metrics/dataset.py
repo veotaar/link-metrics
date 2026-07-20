@@ -6,8 +6,10 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,14 @@ _USER_TIMESTAMP_MILLISECONDS = 1_767_225_600_000
 
 class DatasetError(Exception):
     """The control plane could not construct deterministic Dataset inputs."""
+
+
+@dataclass(frozen=True)
+class ReferenceTokenCorpus:
+    """One byte-identical protected-Scenario authentication input."""
+
+    serialized: bytes
+    evidence: dict[str, Any]
 
 
 def _manifest_path(root: Path) -> Path:
@@ -76,6 +86,14 @@ class _DeterministicRandom:
 
 def _rng(seed: int, stream: str) -> _DeterministicRandom:
     return _DeterministicRandom(seed, stream)
+
+
+def _permutation_stride(random: _DeterministicRandom, population: int) -> int:
+    """Choose a seeded stride that visits the whole population before repeating."""
+    while True:
+        stride = 1 + random.randrange(population - 1)
+        if math.gcd(stride, population) == 1:
+            return stride
 
 
 def _repetition_seed(manifest: dict[str, Any], repetition: int) -> int:
@@ -138,13 +156,12 @@ def _reference_token(secret: bytes, user_id: str, issued_at: int) -> str:
     return f"{signing_input}.{signature}"
 
 
-def write_reference_tokens(
+def build_reference_token_corpus(
     root: Path,
     repetition: int,
-    output: Path,
     issued_at: int | None = None,
-) -> dict[str, Any]:
-    """Write fresh, deterministically serialized tokens for protected Scenarios."""
+) -> ReferenceTokenCorpus:
+    """Build fresh, deterministically serialized tokens for protected Scenarios."""
     manifest = describe_dataset(root)
     seed = _repetition_seed(manifest, repetition)
     issued_at = int(time.time()) if issued_at is None else issued_at
@@ -188,18 +205,31 @@ def write_reference_tokens(
     serialized_identities = json.dumps(
         identities, separators=(",", ":"), sort_keys=True
     ).encode()
+    return ReferenceTokenCorpus(
+        serialized=serialized,
+        evidence={
+            "count": len(entries),
+            "expiresAt": corpus["expiresAt"],
+            "identitySha256": hashlib.sha256(serialized_identities).hexdigest(),
+            "issuedAt": issued_at,
+            "repetition": repetition,
+            "seed": seed,
+            "sha256": hashlib.sha256(serialized).hexdigest(),
+        },
+    )
+
+
+def write_reference_tokens(
+    root: Path,
+    repetition: int,
+    output: Path,
+    issued_at: int | None = None,
+) -> dict[str, Any]:
+    """Write one fresh reference-token corpus."""
+    corpus = build_reference_token_corpus(root, repetition, issued_at)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(serialized)
-    return {
-        "count": len(entries),
-        "expiresAt": corpus["expiresAt"],
-        "identitySha256": hashlib.sha256(serialized_identities).hexdigest(),
-        "issuedAt": issued_at,
-        "output": str(output),
-        "repetition": repetition,
-        "seed": seed,
-        "sha256": hashlib.sha256(serialized).hexdigest(),
-    }
+    output.write_bytes(corpus.serialized)
+    return {**corpus.evidence, "output": str(output)}
 
 
 def sample_workload(
@@ -218,8 +248,10 @@ def sample_workload(
     total_links = manifest["shortLinks"]["total"]
 
     uniform_start = access_rng.randrange(total_links)
+    uniform_stride = _permutation_stride(access_rng, total_links)
     uniform_access = [
-        _short_code((uniform_start + index) % total_links) for index in range(count)
+        _short_code((uniform_start + index * uniform_stride) % total_links)
+        for index in range(count)
     ]
     viral_access = []
     viral_pattern: list[bool] = []
@@ -228,12 +260,15 @@ def sample_workload(
         access_rng.shuffle(block)
         viral_pattern.extend(block)
     viral_tail_start = access_rng.randrange(total_links - 1)
+    viral_tail_stride = _permutation_stride(access_rng, total_links - 1)
     viral_tail_index = 0
     for viral in viral_pattern[:count]:
         if viral:
             short_code_index = VIRAL_SHORT_CODE_INDEX
         else:
-            short_code_index = 1 + (viral_tail_start + viral_tail_index) % (total_links - 1)
+            short_code_index = 1 + (
+                viral_tail_start + viral_tail_index * viral_tail_stride
+            ) % (total_links - 1)
             viral_tail_index += 1
         viral_access.append(_short_code(short_code_index))
 
