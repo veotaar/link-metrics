@@ -1058,6 +1058,31 @@ def test_login_verifies_an_independently_generated_standard_argon2id_hash() -> N
         assert response[0] == 200
 
 
+def test_login_rejects_a_stored_hash_outside_the_standard_argon2id_profile() -> None:
+    # Independently generated for "nonstandard-password" with a valid but
+    # deliberately cheaper m=32768, t=2, p=1 profile.
+    nonstandard_hash = (
+        "$argon2id$v=19$m=32768,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$"
+        "j8CA8NsVcyKr9wEOt2feXKgVmvVdae4qA2Iq6fMW+nM"
+    )
+
+    with running_contender() as state:
+        database_container = state["database"]["container"]
+        inserted = run_psql(
+            database_container,
+            "INSERT INTO public.users (email, password_hash) VALUES "
+            f"('nonstandard-hash@example.com', '{nonstandard_hash}')",
+        )
+        response = login_user(
+            state["contender"]["url"],
+            "nonstandard-hash@example.com",
+            "nonstandard-password",
+        )
+
+        assert inserted.returncode == 0, inserted.stderr
+        assert response == (401, b'{"error":"unauthorized"}', "application/json")
+
+
 def test_login_uses_one_autocommit_read_committed_lookup() -> None:
     with running_contender() as state:
         health_url = state["contender"]["url"]

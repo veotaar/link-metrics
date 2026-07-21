@@ -27,8 +27,7 @@ const shortCodePattern = /^[0-9A-Za-z]{8}$/;
 const argon2idAlgorithm = 2 as const;
 const jsonContentTypePattern = /^application\/json(?:\s*;\s*charset\s*=\s*(?:utf-8|"utf-8"))?\s*$/i;
 
-type AppEnvironment = { Variables: { userId: string } };
-type AppContext = Context<AppEnvironment>;
+type AppContext = Context;
 type Credentials = { email: string; password: string };
 type ErrorDetail = {
   code: "invalid" | "required" | "unknown";
@@ -45,7 +44,7 @@ const client = new SQL({
   url: connectionUrl.toString(),
 });
 const database = drizzle({ client });
-const app = new Hono<AppEnvironment>();
+const app = new Hono();
 
 function postgresErrorCode(error: unknown): string | undefined {
   let current = error;
@@ -111,6 +110,29 @@ function destinationFrom(body: unknown): { details: ErrorDetail[] } | { value: s
     details.push({ field: "url", code: "invalid" });
   }
   return details.length > 0 ? { details: sortedDetails(details) } : { value: record.url as string };
+}
+
+function canonicalBase64HasLength(value: string, byteLength: number): boolean {
+  const bytes = Buffer.from(value, "base64");
+  return bytes.length === byteLength && bytes.toString("base64").replace(/=+$/, "") === value;
+}
+
+async function passwordMatches(password: string, encodedHash: string): Promise<boolean> {
+  const match = /^\$argon2id\$v=19\$m=65536,t=3,p=4\$([A-Za-z0-9+/]+)\$([A-Za-z0-9+/]+)$/.exec(
+    encodedHash,
+  );
+  if (
+    !match ||
+    !canonicalBase64HasLength(match[1]!, 16) ||
+    !canonicalBase64HasLength(match[2]!, 32)
+  ) {
+    return false;
+  }
+  try {
+    return await verify(encodedHash, password);
+  } catch {
+    return false;
+  }
 }
 
 async function jsonBody(context: AppContext): Promise<Response | unknown> {
@@ -275,7 +297,7 @@ app.post("/api/auth/login", async (context) => {
       LIMIT 1
     `);
     const user = result[0];
-    if (!user || !(await verify(user.password_hash, validated.value.password))) {
+    if (!user || !(await passwordMatches(validated.value.password, user.password_hash))) {
       return context.json({ error: "unauthorized" }, 401);
     }
     return context.json({ token: issueToken(user.id) }, 200);
