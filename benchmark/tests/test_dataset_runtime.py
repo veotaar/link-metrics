@@ -9,6 +9,7 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CONTENDER_ID = "express-node"
+SECOND_CONTENDER_ID = "nest-node"
 FULL_DATASET_ENABLED = os.environ.get("LINK_METRICS_TEST_FULL_DATASET") == "1"
 
 
@@ -66,6 +67,9 @@ def test_full_dataset_build_clone_and_reset_fidelity() -> None:
         assert len(provenance["templateChecksum"]) == 64
         assert provenance["fingerprint"]["users"] == 100_000
         assert provenance["fingerprint"]["shortLinks"] == 1_000_000
+        assert provenance["userSeedCache"]["status"] in {"built", "reused"}
+        assert provenance["userSeedCache"]["users"] == 100_000
+        assert len(provenance["userSeedCache"]["sha256"]) == 64
         assert provenance["fingerprint"]["ownership"] == {
             "maximumClicked": 5,
             "maximumNeverClicked": 5,
@@ -136,4 +140,20 @@ def test_full_dataset_build_clone_and_reset_fidelity() -> None:
         assert json.loads(state.stdout)["contender"]["readiness"] == 204
     finally:
         stopped = run_control_plane("contenders", "stop", CONTENDER_ID)
+        assert stopped.returncode == 0, stopped.stderr
+
+    try:
+        started = run_control_plane("contenders", "start", SECOND_CONTENDER_ID)
+        assert started.returncode == 0, started.stderr
+
+        reused = run_control_plane("dataset", "build", SECOND_CONTENDER_ID)
+        assert reused.returncode == 0, reused.stderr
+        second_provenance = json.loads(reused.stdout)
+        assert second_provenance["userSeedCache"] == {
+            **provenance["userSeedCache"],
+            "status": "reused",
+        }
+        assert second_provenance["templateChecksum"] == provenance["templateChecksum"]
+    finally:
+        stopped = run_control_plane("contenders", "stop", SECOND_CONTENDER_ID)
         assert stopped.returncode == 0, stopped.stderr

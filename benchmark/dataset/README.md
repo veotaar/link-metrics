@@ -17,13 +17,21 @@ uv run link-metrics dataset inspect express-node --root ..
 uv run link-metrics dataset reset express-node --expected-checksum <sha256> --root ..
 ```
 
-`build` is the deliberately expensive, one-time operation for a running PostgreSQL
-environment. It streams exactly 100,000 Users and 1,000,000 Short Links, computes a
+`build` streams exactly 100,000 Users and 1,000,000 Short Links, computes a
 catalog-and-content fingerprint, and clones an immutable versioned template database.
 Every User receives ten Short Links: five never clicked and five with deterministic
 nonzero Click counts and timestamps. Argon2id hashes use distinct salts from the
 versioned HMAC-SHA256 cryptographic pseudorandom generator so rebuilding the same
 Dataset version produces the same state.
+
+The expensive User seed generation is persistent across local Contender environments.
+The first `build` for a Dataset provenance checksum computes the 100,000 production-profile
+Argon2id hashes and atomically stores a validated User CSV under
+`${XDG_CACHE_HOME:-~/.cache}/link-metrics/datasets`. Later builds—including builds for a
+different Contender—verify and reuse that artifact, then regenerate only the inexpensive
+Short Link stream. Set `LINK_METRICS_DATASET_CACHE_DIR` to override the cache location.
+Changes to Dataset inputs or generation code select a new cache key automatically, and a
+missing or corrupt artifact is rebuilt under a cross-process file lock.
 
 `reset` does not reconstruct data. It verifies committed source provenance, terminates
 sessions on the fixed Trial database, recreates it from the template, checks the full
@@ -37,9 +45,10 @@ fresh, identically serialized 15-minute reference JWTs. Each token entry include
 owned Short Code. Generate the corpus once per Trial and share that file across
 Contenders; an explicit `--issued-at` is available for reproducibility checks.
 
-The million-row construction acceptance test is intentionally opt-in because it performs
-all 100,000 production-profile Argon2id hashes. Run it against disposable Docker resources
-before publishing a Dataset version:
+The million-row construction acceptance test is intentionally opt-in. On a cache miss it
+performs all 100,000 production-profile Argon2id hashes; it then builds a second Contender
+environment from the same cached artifact to prove cross-Contender reuse. Run it against
+disposable Docker resources before publishing a Dataset version:
 
 ```sh
 LINK_METRICS_TEST_FULL_DATASET=1 uv run pytest tests/test_dataset_runtime.py -q

@@ -39,8 +39,9 @@ negative fuzzing, response and header checks, and stateful creation-to-statistic
 from OpenAPI 3.1. The Contender remains opaque throughout both gates.
 
 The `dataset` command group publishes deterministic workload samples and fresh reference
-tokens, builds the expensive immutable PostgreSQL template separately from Trials, and
-resets the fixed Trial database by verified clone plus explicit buffer prewarming. See
+tokens, builds the immutable PostgreSQL template separately from Trials using a persistent
+local cache for expensive User seed generation, and resets the fixed Trial database by
+verified clone plus explicit buffer prewarming. See
 [`dataset/README.md`](dataset/README.md) for the lifecycle and provenance commands.
 
 `contenders discover` scans `backends/*/contender.yaml`, validates each document against `schemas/contender.schema.json`, rejects duplicate identities, and emits deterministic JSON. `contract lint` validates the OpenAPI 3.1.2 document, its semantic version, and unique operation identifiers; the API Contract itself remains the sole authority for its operation surface.

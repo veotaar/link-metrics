@@ -4,18 +4,15 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import hmac
 import json
-import os
+import shutil
 import subprocess
-from concurrent.futures import ProcessPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
-
-from argon2.low_level import Type, hash_secret
+from typing import Any
 
 from link_metrics.dataset import DatasetError, _short_code, _user_id, describe_dataset
+from link_metrics.dataset_seed_cache import UserSeedCache, ensure_user_seed_cache
 from link_metrics.runtime import (
     CONTROL_ROLE,
     CONTENDER_ROLE,
@@ -79,6 +76,7 @@ def _source_checksum(root: Path) -> str:
         root / "benchmark" / "fixtures" / "jwt-hs256.key",
         root / "benchmark" / "src" / "link_metrics" / "dataset.py",
         root / "benchmark" / "src" / "link_metrics" / "dataset_runtime.py",
+        root / "benchmark" / "src" / "link_metrics" / "dataset_seed_cache.py",
         *sorted((root / "database" / "migrations").glob("*.sql")),
     ]
     for path in paths:
@@ -135,38 +133,12 @@ def _validate_template_metadata(
         raise DatasetError(f"template database {database} is not immutable")
 
 
-def _password_hash(arguments: tuple[str, int, dict[str, int], str]) -> str:
-    password, user_index, parameters, salt_seed = arguments
-    salt = hmac.new(
-        bytes.fromhex(salt_seed),
-        user_index.to_bytes(8, "big"),
-        hashlib.sha256,
-    ).digest()[: parameters["saltLength"]]
-    return hash_secret(
-        password.encode("ascii"),
-        salt,
-        time_cost=parameters["timeCost"],
-        memory_cost=parameters["memoryKiB"],
-        parallelism=parameters["parallelism"],
-        hash_len=parameters["hashLength"],
-        type=Type.ID,
-        version=parameters["version"],
-    ).decode("ascii")
-
-
-def _hash_arguments(
+def _stream_dataset(
+    container: str,
     manifest: dict[str, Any],
-) -> Iterable[tuple[str, int, dict[str, int], str]]:
-    for user_index in range(manifest["users"]):
-        yield (
-            manifest["benchmarkPassword"],
-            user_index,
-            manifest["argon2id"],
-            manifest["saltSeed"],
-        )
-
-
-def _stream_dataset(container: str, manifest: dict[str, Any]) -> None:
+    source_checksum: str,
+) -> UserSeedCache:
+    user_seed_cache = ensure_user_seed_cache(manifest, source_checksum)
     command = [
         "docker",
         "exec",
@@ -194,18 +166,8 @@ def _stream_dataset(container: str, manifest: dict[str, Any]) -> None:
         process.stdin.write(
             "COPY public.users (id, email, password_hash, created_at) FROM STDIN WITH (FORMAT csv);\n"
         )
-        workers = max(1, min(2, os.cpu_count() or 1))
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            hashes = pool.map(_password_hash, _hash_arguments(manifest), chunksize=8)
-            for user_index, password_hash in enumerate(hashes):
-                writer.writerow(
-                    (
-                        _user_id(user_index),
-                        f"benchmark-user-{user_index:06d}@example.invalid",
-                        password_hash,
-                        _CREATED_AT.isoformat(),
-                    )
-                )
+        with user_seed_cache.path.open("r", encoding="utf-8", newline="") as users:
+            shutil.copyfileobj(users, process.stdin, length=1024 * 1024)
         process.stdin.write("\\.\n")
         process.stdin.write(
             "COPY public.links "
@@ -253,6 +215,7 @@ def _stream_dataset(container: str, manifest: dict[str, Any]) -> None:
     if return_code != 0:
         detail = stderr.strip() or stdout.strip() or "unknown PostgreSQL COPY failure"
         raise DatasetError(f"Benchmark Dataset construction failed: {detail}")
+    return user_seed_cache
 
 
 def _fingerprint(container: str, database: str) -> dict[str, Any]:
@@ -475,7 +438,7 @@ def build_template(root: Path, contender_id: str) -> dict[str, Any]:
     if contender_was_running:
         _docker("stop", "--time", "5", names.contender)
     try:
-        _stream_dataset(container, manifest)
+        user_seed_cache = _stream_dataset(container, manifest, source_checksum)
         fingerprint = _fingerprint(container, DATABASE_NAME)
         _validate_fingerprint(fingerprint, manifest)
         checksum = _template_checksum(fingerprint)
@@ -517,7 +480,17 @@ ALTER DATABASE {template} WITH IS_TEMPLATE true ALLOW_CONNECTIONS false;
             document = _container_document(names.contender)
             _wait_for_readiness(_contender_url(document, contender["port"]))
 
-    return {"database": template, "status": "built", **metadata}
+    return {
+        "database": template,
+        "status": "built",
+        "userSeedCache": {
+            "sha256": user_seed_cache.sha256,
+            "sourceChecksum": user_seed_cache.source_checksum,
+            "status": user_seed_cache.status,
+            "users": user_seed_cache.users,
+        },
+        **metadata,
+    }
 
 
 def reset_from_template(
