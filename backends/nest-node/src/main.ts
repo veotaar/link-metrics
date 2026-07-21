@@ -230,6 +230,11 @@ function postgresErrorCode(error: unknown): string | undefined {
   return undefined;
 }
 
+function unavailableUnlessHttpException(error: unknown): never {
+  if (error instanceof HttpException) throw error;
+  return fail(503, "unavailable");
+}
+
 @Injectable()
 class Database implements OnModuleDestroy {
   private readonly pool = new Pool({
@@ -239,7 +244,7 @@ class Database implements OnModuleDestroy {
     options: "-c statement_timeout=2000",
     query_timeout: 2_000,
   });
-  readonly query = drizzle(this.pool);
+  readonly db = drizzle(this.pool);
 
   constructor() {
     this.pool.on("error", (error) => console.error("Unexpected idle PostgreSQL pool error", error));
@@ -254,7 +259,9 @@ class Database implements OnModuleDestroy {
 class BearerGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest<Request>();
-    const subject = requestSubject(request);
+    const establishedSubject = request.res?.locals.userId;
+    const subject =
+      typeof establishedSubject === "string" ? establishedSubject : requestSubject(request);
     if (!subject) fail(401, "unauthorized");
     request.res!.locals.userId = subject;
     return true;
@@ -276,7 +283,7 @@ class AuthenticationController {
         salt.toString("base64").replace(/=+$/, ""),
         tag.toString("base64").replace(/=+$/, ""),
       ].join("$");
-      const result = await this.database.query.execute<{
+      const result = await this.database.db.execute<{
         created_at: string;
         email: string;
         id: string;
@@ -302,7 +309,7 @@ class AuthenticationController {
   async login(@Body() body: unknown): Promise<{ token: string }> {
     const credentials = credentialsFrom(body);
     try {
-      const result = await this.database.query.execute<{ id: string; password_hash: string }>(sql`
+      const result = await this.database.db.execute<{ id: string; password_hash: string }>(sql`
         SELECT id, password_hash
         FROM users
         WHERE email = ${credentials.email.toLowerCase()}
@@ -314,8 +321,7 @@ class AuthenticationController {
       }
       return { token: issueToken(user.id) };
     } catch (error) {
-      if (error instanceof HttpException) throw error;
-      return fail(503, "unavailable");
+      return unavailableUnlessHttpException(error);
     }
   }
 }
@@ -329,7 +335,7 @@ class ShortLinksController {
   async create(@Body() body: unknown, @Res() response: Response): Promise<void> {
     const destination = destinationFrom(body);
     try {
-      const rows = await this.database.query
+      const rows = await this.database.db
         .insert(links)
         .values({ originalUrl: destination, userId: response.locals.userId as string })
         .returning({
@@ -344,8 +350,7 @@ class ShortLinksController {
       if (!rows[0]) return fail(503, "unavailable");
       response.status(201).json(rows[0]);
     } catch (error) {
-      if (error instanceof HttpException) throw error;
-      return fail(503, "unavailable");
+      return unavailableUnlessHttpException(error);
     }
   }
 
@@ -356,7 +361,7 @@ class ShortLinksController {
   ): Promise<void> {
     if (!shortCodePattern.test(shortCode)) return fail(404, "not_found");
     try {
-      const result = await this.database.query.execute<{
+      const result = await this.database.db.execute<{
         click_count: string;
         last_clicked_at: string | null;
         original_url: string;
@@ -371,20 +376,19 @@ class ShortLinksController {
           AND user_id = ${response.locals.userId as string}
         LIMIT 1
       `);
-      const link = result.rows[0];
-      if (!link) return fail(404, "not_found");
+      const shortLink = result.rows[0];
+      if (!shortLink) return fail(404, "not_found");
       response
         .status(200)
         .type("application/json")
         .send(
-          `{"shortCode":${JSON.stringify(link.short_code)},` +
-            `"originalUrl":${JSON.stringify(link.original_url)},` +
-            `"clickCount":${link.click_count},` +
-            `"lastClickedAt":${JSON.stringify(link.last_clicked_at)}}`,
+          `{"shortCode":${JSON.stringify(shortLink.short_code)},` +
+            `"originalUrl":${JSON.stringify(shortLink.original_url)},` +
+            `"clickCount":${shortLink.click_count},` +
+            `"lastClickedAt":${JSON.stringify(shortLink.last_clicked_at)}}`,
         );
     } catch (error) {
-      if (error instanceof HttpException) throw error;
-      return fail(503, "unavailable");
+      return unavailableUnlessHttpException(error);
     }
   }
 }
@@ -396,7 +400,7 @@ class OperationsController {
   @Get("health")
   async health(@Res() response: Response): Promise<void> {
     try {
-      const result = await this.database.query.execute<{ version: string }>(sql`
+      const result = await this.database.db.execute<{ version: string }>(sql`
         SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1
       `);
       if (result.rows[0]?.version === expectedMigrationVersion) {
@@ -413,18 +417,17 @@ class OperationsController {
   async resolve(@Param("shortCode") shortCode: string, @Res() response: Response): Promise<void> {
     if (!shortCodePattern.test(shortCode)) return fail(404, "not_found");
     try {
-      const result = await this.database.query.execute<{ original_url: string }>(sql`
+      const result = await this.database.db.execute<{ original_url: string }>(sql`
         UPDATE links
         SET click_count = click_count + 1, last_clicked_at = clock_timestamp()
         WHERE short_code = ${shortCode}
         RETURNING original_url
       `);
-      const link = result.rows[0];
-      if (!link) return fail(404, "not_found");
-      response.status(302).set("Location", link.original_url).end();
+      const shortLink = result.rows[0];
+      if (!shortLink) return fail(404, "not_found");
+      response.status(302).set("Location", shortLink.original_url).end();
     } catch (error) {
-      if (error instanceof HttpException) throw error;
-      return fail(503, "unavailable");
+      return unavailableUnlessHttpException(error);
     }
   }
 }
