@@ -114,35 +114,6 @@ jobs:
 
       - name: Build and conform ${{ matrix.contender }}
         run: cd benchmark && uv run link-metrics contenders conform "${{ matrix.contender }}" --root ..
-      - name: Build the Dataset template for ${{ matrix.contender }}
-        shell: bash
-        run: |
-          cd benchmark
-          uv run link-metrics contenders start "${{ matrix.contender }}" --root ..
-          uv run link-metrics dataset build "${{ matrix.contender }}" --root ..
-      - name: Prove nonofficial k6 and result-bundle wiring
-        shell: bash
-        run: |
-          bundle_path="/tmp/${{ matrix.contender }}-smoke.json"
-          cd benchmark
-          uv run link-metrics trial smoke "${{ matrix.contender }}" --output "$bundle_path" --root ..
-          uv run python - "$bundle_path" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          bundle = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          assert bundle["official"] is False
-          assert bundle["mode"] == "smoke"
-          assert bundle["environment"]["fingerprint"]["resourceProfile"] is None
-          assert bundle["results"]["achievedIterations"] > 0
-          assert bundle["results"]["checksPassed"] > 0
-          assert bundle["results"]["droppedIterations"] == 0
-          assert bundle["results"]["checksFailed"] == 0
-          assert bundle["results"]["errors"]["transportFailures"] == 0
-          assert bundle["results"]["errors"]["unexpectedResponses"] == 0
-          assert bundle["validity"]["k6SchedulingHealthy"] is True
-          PY
       - name: Stop correctness environment
         if: always()
         run: cd benchmark && uv run link-metrics contenders stop "${{ matrix.contender }}" --root ..

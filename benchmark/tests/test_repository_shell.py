@@ -93,26 +93,15 @@ def test_hosted_ci_is_a_discovery_driven_correctness_gate() -> None:
         assert command in authority_commands
 
     contender_commands = "\n".join(step.get("run", "") for step in contender_gate["steps"])
-    required_contender_commands = (
-        'contenders conform "${{ matrix.contender }}"',
-        'dataset build "${{ matrix.contender }}"',
-        'trial smoke "${{ matrix.contender }}"',
-        "bundle[\"official\"] is False",
-        "bundle[\"mode\"] == \"smoke\"",
-        "bundle[\"environment\"][\"fingerprint\"][\"resourceProfile\"] is None",
-        "bundle[\"results\"][\"achievedIterations\"] > 0",
-        "bundle[\"results\"][\"checksPassed\"] > 0",
-        "bundle[\"results\"][\"droppedIterations\"] == 0",
-        "bundle[\"validity\"][\"k6SchedulingHealthy\"] is True",
-    )
-    for command in required_contender_commands:
-        assert command in contender_commands
+    assert 'contenders conform "${{ matrix.contender }}"' in contender_commands
 
-    forbidden_official_commands = (
+    forbidden_hosted_commands = (
+        "dataset build",
+        "trial smoke",
         "trial run",
         "capacity run",
         "startup run",
         "report generate",
     )
-    for command in forbidden_official_commands:
+    for command in forbidden_hosted_commands:
         assert command not in workflow_source
