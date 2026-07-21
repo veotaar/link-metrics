@@ -54,7 +54,20 @@ def trial_bundle(
         "repetition": repetition,
         "workloadSeed": SEEDS[repetition - 1],
         "contender": {"id": contender},
-        "environment": {"fingerprint": {"profileVersion": environment}},
+        "environment": {
+            "fingerprint": {"profileVersion": environment},
+            "execution": {
+                "observed": True,
+                "valid": True,
+                "frequencyKHz": {
+                    "average": 4_200_000,
+                    "minimum": 4_190_000,
+                    "maximum": 4_210_000,
+                },
+                "temperatureMilliCelsius": {"average": 60_000, "peak": 65_000},
+                "thermalThrottleIncrements": {},
+            },
+        },
         "lifecycle": {"measureSeconds": 60},
         "workload": {"offeredRate": offered_rate},
         "results": {
@@ -64,6 +77,35 @@ def trial_bundle(
             "errors": {
                 "unexpectedResponses": unexpected_responses,
                 "transportFailures": transport_failures,
+            },
+            "resourceTelemetry": {
+                "contender": {
+                    "observed": True,
+                    "cpuTimeSeconds": 12.5,
+                    "averageResidentMemoryBytes": 100,
+                    "peakResidentMemoryBytes": 200,
+                    "networkBytes": {"received": 300, "sent": 400},
+                },
+                "postgres": {
+                    "observed": True,
+                    "cpuTimeSeconds": 7.5,
+                    "averageResidentMemoryBytes": 500,
+                    "peakResidentMemoryBytes": 600,
+                    "networkBytes": {"received": 700, "sent": 800},
+                },
+            },
+            "postgresTelemetry": {
+                "observed": True,
+                "transactions": {"committed": 6_000, "rolledBack": 0, "deadlocks": 0},
+                "locks": {
+                    "before": {"granted": 2, "waiting": 0},
+                    "after": {"granted": 3, "waiting": 0},
+                    "sampleCount": 4,
+                    "peakGranted": 5,
+                    "peakWaiting": 1,
+                },
+                "databaseBlocks": {"read": 10, "cacheHits": 5_990},
+                "ioOperations": {"reads": 11, "writes": 12},
             },
         },
         "validity": {"valid": valid, "reasons": [] if valid else ["invalid"]},
@@ -298,6 +340,34 @@ def test_reports_regenerate_deterministically_without_composite_ranking(
         "failingRate": 103,
         "relativeBracketWidth": 0.03,
     }
+    sample = compact["scenarios"][0]["contenders"][0]["rates"][0]["samples"][0]
+    assert sample["resourceTelemetry"]["contender"]["cpuTimeSeconds"] == 12.5
+    assert sample["postgresTelemetry"]["transactions"]["committed"] == 6_000
+    assert sample["hostExecution"]["frequencyKHz"]["minimum"] == 4_190_000
+    assert b"resource telemetry" in first_bytes["report.md"].lower()
+    assert b"postgresql io reads" in first_bytes["report.md"].lower()
+    assert b"host execution evidence" in first_bytes["report.md"].lower()
+
+
+def test_runtime_diagnostics_are_optional_explanatory_sample_data() -> None:
+    bundles = [trial_bundle(index) for index in range(1, 6)]
+    bundles[0]["results"]["runtimeDiagnostics"] = {
+        "kind": "node-v8",
+        "gcPauseMs": 1.25,
+    }
+
+    samples = summarize_trial_bundles(bundles)["scenarios"][0]["contenders"][0]["rates"][0][
+        "samples"
+    ]
+
+    assert samples[0]["runtimeDiagnostics"] == {
+        "kind": "node-v8",
+        "gcPauseMs": 1.25,
+    }
+    assert "runtimeDiagnostics" not in samples[1]
+    assert "runtimeDiagnostics" not in summarize_trial_bundles(bundles)["scenarios"][0][
+        "contenders"
+    ][0]["rates"][0]["statistics"]
 
 
 def test_capacity_sweep_records_calibration_and_five_trials_at_every_target(

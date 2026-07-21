@@ -30,4 +30,4 @@ def test_complete_scenario_methodology_starts_a_new_result_series() -> None:
         REPOSITORY_ROOT / "benchmark/protocol/VERSION"
     ).read_text(encoding="utf-8").strip()
 
-    assert version == "2.0.0"
+    assert version == "3.0.0"

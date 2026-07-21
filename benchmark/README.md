@@ -54,7 +54,11 @@ measure windows. The accepted Scenarios are `registration`, `login`, `short-link
 built Dataset template, pin Grafana k6 by
 digest, and emit an immutable raw result bundle. Bundle paths are create-only so existing
 evidence is never overwritten. Official Trials also run the conformance gate, enforce the
-local CPU and memory profile, and capture container and PostgreSQL resource telemetry.
+`local-7800x3d` physical-core and no-swap profile, require a stable-host preflight, record
+frequency and temperature evidence, and capture mandatory Contender and PostgreSQL cgroup
+CPU time, sampled resident-memory, network, transaction, sampled-lock, read, and write
+telemetry. Missing telemetry
+or frequency and thermal excursions invalidate a Trial without deleting its raw evidence.
 
 ```sh
 uv run link-metrics dataset build express-node --root ..
@@ -77,6 +81,18 @@ uv run link-metrics capacity run express-node --scenario registration \
   --output /tmp/registration-series.json --root ..
 ```
 
+Cold startup is measured independently from warm capacity. It requires the same running
+PostgreSQL container and previously built Dataset template as a Trial, but no running
+Contender. `startup run` performs 20 process starts, resetting the ready Dataset before
+each repetition. Container creation, image build/pull, migrations, and seeding are outside
+the timed interval; Docker's process `StartedAt` timestamp anchors time to the first
+`/health` 204, followed by the latency of the first real registration request.
+
+```sh
+uv run link-metrics startup run express-node \
+  --output /tmp/express-node-startup.json --root ..
+```
+
 Each Scenario is calibrated, qualified, and reported independently. Login and registration
 use a 1,000 ms p99 budget; creation, statistics, and resolution use 250 ms. Protected
 Scenarios cycle the seeded 10,000-User reference-token corpus. Resolution distributions are
@@ -86,7 +102,9 @@ Reports are regenerated from one or more comparable raw Result Series. Generatio
 different API Contract, protocol, Benchmark Dataset, or environment fingerprints and writes
 a compact JSON summary plus deterministic Markdown and HTML. Each rate includes every sample,
 median, exact 95% bootstrap interval, coefficient of variation, instability, qualification
-reasons, and the per-Scenario maximum sustainable throughput.
+reasons, mandatory resource evidence, and the per-Scenario maximum sustainable throughput.
+Cold-start bundles may be supplied alone or alongside a comparable capacity series; their
+20 samples, median, and p95 are rendered in a separate report section.
 
 ```sh
 uv run link-metrics report generate /tmp/registration-series.json \

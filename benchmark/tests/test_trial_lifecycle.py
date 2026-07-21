@@ -146,6 +146,13 @@ def test_trial_run_requires_rate_and_output() -> None:
     assert result.returncode == 2
 
 
+def test_startup_run_requires_an_output_path() -> None:
+    result = run_control_plane("startup", "run", "express-node")
+
+    assert result.returncode == 2
+    assert "output" in result.stderr.lower() or "required" in result.stderr.lower()
+
+
 @pytest.mark.parametrize(
     "scenario",
     [

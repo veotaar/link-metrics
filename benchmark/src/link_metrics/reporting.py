@@ -8,15 +8,22 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from link_metrics.results import ResultError, summarize_trial_bundles
+from link_metrics.results import ResultError, comparability_key, summarize_trial_bundles
+from link_metrics.startup import StartupError, validate_cold_start_bundle
 
 
 def _load_raw_series(
     paths: Iterable[Path],
-) -> tuple[list[dict[str, Any]], dict[str, Any], list[int] | None]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, Any],
+    list[int] | None,
+    list[dict[str, Any]],
+]:
     measurements: list[dict[str, Any]] = []
     calibration: dict[str, Any] = {}
     repetition_seeds: list[int] | None = None
+    cold_startups: list[dict[str, Any]] = []
     for path in paths:
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
@@ -41,9 +48,28 @@ def _load_raw_series(
                 if contender in calibration and calibration[contender] != value:
                     raise ResultError(f"conflicting calibration for Contender {contender}")
                 calibration[contender] = value
+        elif document.get("kind") == "cold-start-series":
+            if not document.get("official"):
+                raise ResultError(f"cold-start Result Series {path} is nonofficial")
+            try:
+                summary = validate_cold_start_bundle(document)
+                contender = str(document["contender"]["id"])
+            except (KeyError, TypeError, StartupError) as error:
+                raise ResultError(f"cold-start Result Series {path} is incomplete") from error
+            cold_startups.append(
+                {
+                    "contender": contender,
+                    "summary": summary,
+                    "repetitions": document["repetitions"],
+                    "validity": document.get("validity", {"valid": False, "reasons": ["missing"]}),
+                    "comparabilityKey": comparability_key(document),
+                    "hostExecution": document["environment"]["execution"],
+                    "preflight": document["environment"]["preflight"],
+                }
+            )
         else:
             measurements.append(document)
-    return measurements, calibration, repetition_seeds
+    return measurements, calibration, repetition_seeds, cold_startups
 
 
 def _format_number(value: Any) -> str:
@@ -66,6 +92,15 @@ def _compact_calibration(calibration: dict[str, Any]) -> dict[str, Any]:
         except (KeyError, TypeError, ValueError) as error:
             raise ResultError(f"calibration for Contender {contender} is incomplete") from error
     return compact
+
+
+def _nested(value: dict[str, Any], *path: str) -> Any:
+    current: Any = value
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current
 
 
 def _markdown_report(summary: dict[str, Any]) -> str:
@@ -141,6 +176,150 @@ def _markdown_report(summary: dict[str, Any]) -> str:
                     else "not qualified: " + ", ".join(rate["qualificationFailures"])
                 )
                 lines.extend(["", f"Qualification: {qualification}."])
+                if any("resourceTelemetry" in sample for sample in rate["samples"]):
+                    lines.extend(
+                        [
+                            "",
+                            "Resource telemetry:",
+                            "",
+                            "| Rep | Contender CPU s | Contender avg/peak RSS bytes | "
+                            "Contender network recv/sent bytes | PostgreSQL CPU s | "
+                            "PostgreSQL avg/peak RSS bytes | PostgreSQL network recv/sent bytes | "
+                            "Transactions commit/rollback | Peak locks granted/waiting | "
+                            "PostgreSQL IO reads/writes |",
+                            "| ---: | ---: | --- | --- | ---: | --- | --- | --- | --- | --- |",
+                        ]
+                    )
+                    for sample in rate["samples"]:
+                        resources = sample.get("resourceTelemetry", {})
+                        contender_resource = resources.get("contender", {})
+                        postgres_resource = resources.get("postgres", {})
+                        postgres = sample.get("postgresTelemetry", {})
+                        lines.append(
+                            "| "
+                            + " | ".join(
+                                [
+                                    str(sample["repetition"]),
+                                    _format_number(
+                                        contender_resource.get("cpuTimeSeconds")
+                                    ),
+                                    f"{_format_number(contender_resource.get('averageResidentMemoryBytes'))}/"
+                                    f"{_format_number(contender_resource.get('peakResidentMemoryBytes'))}",
+                                    f"{_format_number(_nested(contender_resource, 'networkBytes', 'received'))}/"
+                                    f"{_format_number(_nested(contender_resource, 'networkBytes', 'sent'))}",
+                                    _format_number(
+                                        postgres_resource.get("cpuTimeSeconds")
+                                    ),
+                                    f"{_format_number(postgres_resource.get('averageResidentMemoryBytes'))}/"
+                                    f"{_format_number(postgres_resource.get('peakResidentMemoryBytes'))}",
+                                    f"{_format_number(_nested(postgres_resource, 'networkBytes', 'received'))}/"
+                                    f"{_format_number(_nested(postgres_resource, 'networkBytes', 'sent'))}",
+                                    f"{_format_number(_nested(postgres, 'transactions', 'committed'))}/"
+                                    f"{_format_number(_nested(postgres, 'transactions', 'rolledBack'))}",
+                                    f"{_format_number(_nested(postgres, 'locks', 'peakGranted'))}/"
+                                    f"{_format_number(_nested(postgres, 'locks', 'peakWaiting'))}",
+                                    f"{_format_number(_nested(postgres, 'ioOperations', 'reads'))}/"
+                                    f"{_format_number(_nested(postgres, 'ioOperations', 'writes'))}",
+                                ]
+                            )
+                            + " |"
+                        )
+                if any("hostExecution" in sample for sample in rate["samples"]):
+                    lines.extend(
+                        [
+                            "",
+                            "Host execution evidence:",
+                            "",
+                            "| Rep | Frequency avg/min/max kHz | Temperature avg/peak m°C | "
+                            "Throttle increments | Valid |",
+                            "| ---: | --- | --- | --- | :---: |",
+                        ]
+                    )
+                    for sample in rate["samples"]:
+                        host = sample.get("hostExecution", {})
+                        lines.append(
+                            "| "
+                            + " | ".join(
+                                [
+                                    str(sample["repetition"]),
+                                    f"{_format_number(_nested(host, 'frequencyKHz', 'average'))}/"
+                                    f"{_format_number(_nested(host, 'frequencyKHz', 'minimum'))}/"
+                                    f"{_format_number(_nested(host, 'frequencyKHz', 'maximum'))}",
+                                    f"{_format_number(_nested(host, 'temperatureMilliCelsius', 'average'))}/"
+                                    f"{_format_number(_nested(host, 'temperatureMilliCelsius', 'peak'))}",
+                                    json.dumps(
+                                        host.get("thermalThrottleIncrements", {}),
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ),
+                                    "yes" if host.get("valid") else "no",
+                                ]
+                            )
+                            + " |"
+                        )
+                diagnostics = [
+                    sample
+                    for sample in rate["samples"]
+                    if "runtimeDiagnostics" in sample
+                ]
+                if diagnostics:
+                    lines.extend(["", "Optional runtime diagnostics:", "", "```json"])
+                    lines.append(json.dumps(diagnostics, indent=2, sort_keys=True))
+                    lines.append("```")
+    if summary.get("coldStartup"):
+        lines.extend(["", "## Cold startup"])
+        for startup in summary["coldStartup"]:
+            validity = startup["validity"]
+            validity_text = (
+                "valid"
+                if validity.get("valid")
+                else "invalid: " + ", ".join(validity.get("reasons", []))
+            )
+            lines.extend(
+                [
+                    "",
+                    f"### Contender: {startup['contender']}",
+                    "",
+                    "Cold-start comparability key:",
+                    "",
+                    "```json",
+                    json.dumps(startup["comparabilityKey"], indent=2, sort_keys=True),
+                    "```",
+                    "",
+                    f"Validity: {validity_text}.",
+                    "",
+                    "| Repetition | Readiness ms | First request ms |",
+                    "| ---: | ---: | ---: |",
+                ]
+            )
+            for sample in startup["repetitions"]:
+                lines.append(
+                    f"| {sample['repetition']} | {_format_number(sample['readinessMs'])} | "
+                    f"{_format_number(sample['firstRequestMs'])} |"
+                )
+            readiness = startup["summary"]["readinessMs"]
+            first_request = startup["summary"]["firstRequestMs"]
+            lines.extend(
+                [
+                    "",
+                    "| Metric | Median ms | p95 ms |",
+                    "| --- | ---: | ---: |",
+                    f"| First readiness 204 | {_format_number(readiness['median'])} | "
+                    f"{_format_number(readiness['p95'])} |",
+                    f"| First real request | {_format_number(first_request['median'])} | "
+                    f"{_format_number(first_request['p95'])} |",
+                ]
+            )
+            lines.extend(
+                [
+                    "",
+                    "Cold-start host execution evidence:",
+                    "",
+                    "```json",
+                    json.dumps(startup["hostExecution"], indent=2, sort_keys=True),
+                    "```",
+                ]
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -161,13 +340,24 @@ def _html_report(summary: dict[str, Any]) -> str:
 
 def write_reports(raw_paths: Sequence[Path], output_dir: Path) -> dict[str, Any]:
     """Regenerate compact JSON, Markdown, and HTML from raw Result Series."""
-    measurements, calibration, repetition_seeds = _load_raw_series(raw_paths)
-    summary = summarize_trial_bundles(
-        measurements,
-        expected_repetition_seeds=repetition_seeds,
-    )
+    measurements, calibration, repetition_seeds, cold_startups = _load_raw_series(raw_paths)
+    if measurements:
+        summary = summarize_trial_bundles(
+            measurements,
+            expected_repetition_seeds=repetition_seeds,
+        )
+    elif cold_startups:
+        summary = {
+            "schemaVersion": 1,
+            "kind": "result-summary",
+            "comparabilityKey": cold_startups[0]["comparabilityKey"],
+            "scenarios": [],
+        }
+    else:
+        raise ResultError("at least one raw Result Series is required")
     summary["repetitionSeeds"] = repetition_seeds
     summary["calibration"] = _compact_calibration(calibration)
+    summary["coldStartup"] = sorted(cold_startups, key=lambda item: item["contender"])
     output_dir.mkdir(parents=True, exist_ok=True)
     contents = {
         "summary.json": json.dumps(summary, indent=2, sort_keys=True) + "\n",

@@ -10,6 +10,7 @@ import pytest
 from link_metrics.trial import (
     TrialError,
     _docker_bytes,
+    _summarize_postgres_telemetry,
     _summarize_resource_samples,
     evaluate_validity,
     registration_email,
@@ -255,6 +256,7 @@ def test_resource_samples_preserve_trial_telemetry() -> None:
                     10.0,
                     {
                         "cpuPercent": 50.0,
+                        "cpuUsageSeconds": 10.0,
                         "residentMemoryBytes": 100,
                         "networkReceivedBytes": 1_000,
                         "networkSentBytes": 2_000,
@@ -266,6 +268,7 @@ def test_resource_samples_preserve_trial_telemetry() -> None:
                     12.0,
                     {
                         "cpuPercent": 75.0,
+                        "cpuUsageSeconds": 11.25,
                         "residentMemoryBytes": 200,
                         "networkReceivedBytes": 1_500,
                         "networkSentBytes": 2_750,
@@ -277,8 +280,93 @@ def test_resource_samples_preserve_trial_telemetry() -> None:
         }
     )["contender"]
 
-    assert summary["cpuTimeSecondsEstimate"] == 1.5
+    assert summary["cpuTimeSeconds"] == 1.25
     assert summary["averageResidentMemoryBytes"] == 150
     assert summary["peakResidentMemoryBytes"] == 200
     assert summary["networkBytes"] == {"received": 500, "sent": 750}
     assert summary["blockIoBytes"] == {"read": 50, "written": 100}
+
+
+def test_postgres_telemetry_records_transactions_locks_reads_and_writes() -> None:
+    before = {
+        "observed": True,
+        "values": {
+            "transactions": {"committed": 100, "rolledBack": 2, "deadlocks": 1},
+            "databaseBlocks": {"read": 20, "cacheHits": 1_000},
+            "locks": {"granted": 3, "waiting": 0},
+            "ioOperations": {
+                "reads": 10,
+                "writes": 20,
+                "writebacks": 2,
+                "extends": 4,
+                "fsyncs": 5,
+            },
+        },
+    }
+    after = {
+        "observed": True,
+        "values": {
+            "transactions": {"committed": 160, "rolledBack": 3, "deadlocks": 1},
+            "databaseBlocks": {"read": 25, "cacheHits": 1_600},
+            "locks": {"granted": 4, "waiting": 1},
+            "ioOperations": {
+                "reads": 16,
+                "writes": 28,
+                "writebacks": 3,
+                "extends": 7,
+                "fsyncs": 9,
+            },
+        },
+    }
+
+    telemetry = _summarize_postgres_telemetry(
+        before,
+        after,
+        [
+            {"granted": 4, "waiting": 0},
+            {"granted": 8, "waiting": 2},
+            {"granted": 5, "waiting": 1},
+        ],
+    )
+
+    assert telemetry["observed"] is True
+    assert telemetry["transactions"] == {
+        "committed": 60,
+        "rolledBack": 1,
+        "deadlocks": 0,
+    }
+    assert telemetry["locks"] == {
+        "before": {"granted": 3, "waiting": 0},
+        "after": {"granted": 4, "waiting": 1},
+        "sampleCount": 3,
+        "peakGranted": 8,
+        "peakWaiting": 2,
+    }
+    assert telemetry["databaseBlocks"] == {"read": 5, "cacheHits": 600}
+    assert telemetry["ioOperations"]["reads"] == 6
+    assert telemetry["ioOperations"]["writes"] == 8
+
+
+def test_trial_is_invalid_when_mandatory_telemetry_or_host_evidence_is_missing() -> None:
+    validity = evaluate_validity(
+        {
+            "droppedIterations": 0,
+            "k6CpuSaturated": False,
+            "k6CpuObserved": True,
+            "mandatoryTelemetry": {
+                "resourceTelemetry": {
+                    "contender": {"observed": True},
+                    "postgres": {"observed": False},
+                },
+                "postgresTelemetry": {"observed": False},
+            },
+            "hostExecution": {"observed": False, "valid": False, "reasons": []},
+        }
+    )
+
+    assert validity["valid"] is False
+    assert set(validity["reasons"]) == {
+        "postgres_resource_telemetry_missing",
+        "postgres_activity_telemetry_missing",
+        "host_execution_evidence_missing",
+    }

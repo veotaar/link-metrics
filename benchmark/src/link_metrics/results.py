@@ -37,7 +37,7 @@ def _trial_sample(bundle: dict[str, Any]) -> dict[str, Any]:
         measure_seconds = int(bundle["lifecycle"]["measureSeconds"])
         errors = bundle["results"]["errors"]
         error_count = int(errors["unexpectedResponses"]) + int(errors["transportFailures"])
-        return {
+        sample = {
             "repetition": int(bundle["repetition"]),
             "workloadSeed": int(bundle["workloadSeed"]),
             "offeredRate": float(bundle["workload"]["offeredRate"]),
@@ -48,6 +48,16 @@ def _trial_sample(bundle: dict[str, Any]) -> dict[str, Any]:
             "valid": bool(bundle["validity"]["valid"]),
             "validityReasons": list(bundle["validity"].get("reasons", [])),
         }
+        for optional_evidence in (
+            "resourceTelemetry",
+            "postgresTelemetry",
+            "runtimeDiagnostics",
+        ):
+            if optional_evidence in bundle["results"]:
+                sample[optional_evidence] = bundle["results"][optional_evidence]
+        if "execution" in bundle.get("environment", {}):
+            sample["hostExecution"] = bundle["environment"]["execution"]
+        return sample
     except (KeyError, TypeError, ValueError, ZeroDivisionError) as error:
         raise ResultError("raw Trial bundle is missing valid result fields") from error
 
@@ -305,7 +315,7 @@ def _enforce_comparability(bundles: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return expected
 
 
-def _percentile(values: Sequence[float], probability: float) -> float:
+def percentile(values: Sequence[float], probability: float) -> float:
     ordered = sorted(values)
     position = (len(ordered) - 1) * probability
     lower = math.floor(position)
@@ -327,8 +337,8 @@ def _metric_statistics(values: Sequence[float]) -> dict[str, Any]:
     return {
         "median": statistics.median(values),
         "confidenceInterval95": {
-            "lower": _percentile(bootstrap_medians, 0.025),
-            "upper": _percentile(bootstrap_medians, 0.975),
+            "lower": percentile(bootstrap_medians, 0.025),
+            "upper": percentile(bootstrap_medians, 0.975),
         },
         "coefficientOfVariation": coefficient,
         "unstable": coefficient > 0.05,

@@ -26,6 +26,7 @@ from link_metrics.runtime import (
     start_contender,
     stop_contender,
 )
+from link_metrics.startup import StartupError, run_cold_startup
 from link_metrics.trial import SCENARIOS, TrialError, run_scenario_trial
 
 
@@ -98,6 +99,16 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--repetition", type=int, default=1)
     run.add_argument("--root", type=Path, default=Path.cwd())
 
+    startup = groups.add_parser("startup", help="measure cold Contender startup")
+    startup_commands = startup.add_subparsers(dest="command", required=True)
+    startup_run = startup_commands.add_parser(
+        "run",
+        help="run the official 20-repetition cold-start measurement",
+    )
+    startup_run.add_argument("contender_id")
+    startup_run.add_argument("--output", type=Path, required=True)
+    startup_run.add_argument("--root", type=Path, default=Path.cwd())
+
     capacity = groups.add_parser("capacity", help="discover and measure Scenario capacity")
     capacity_commands = capacity.add_subparsers(dest="command", required=True)
     capacity_run = capacity_commands.add_parser(
@@ -169,6 +180,12 @@ def main(argv: list[str] | None = None) -> int:
                 [path.resolve() for path in args.raw_bundles],
                 args.output_dir.resolve(),
             )
+        elif args.group == "startup":
+            output = run_cold_startup(
+                args.root.resolve(),
+                args.contender_id,
+                output=args.output.resolve(),
+            )
         elif args.group == "trial" and args.command == "smoke":
             output = run_scenario_trial(
                 args.root.resolve(),
@@ -195,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         ContractLintError,
         DatasetError,
         ResultError,
+        StartupError,
         TrialError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)

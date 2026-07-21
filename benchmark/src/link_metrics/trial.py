@@ -23,6 +23,12 @@ from link_metrics.dataset import (
 )
 from link_metrics.dataset_runtime import inspect_template, reset_from_template
 from link_metrics.evidence import write_immutable_json
+from link_metrics.environment import (
+    LOCAL_RESOURCE_PROFILE,
+    assess_host_preflight,
+    capture_host_observation,
+    summarize_host_execution,
+)
 from link_metrics.scenarios import (
     PROTECTED_SCENARIOS,
     SCENARIO_CONFIGURATIONS,
@@ -110,13 +116,6 @@ TRANSPORT = {
     "httpTimeoutSeconds": 5,
 }
 
-LOCAL_RESOURCE_PROFILE = {
-    "contender": {"cpusetCpus": "0-3", "memoryBytes": 8 * 1024**3},
-    "postgres": {"cpusetCpus": "4-5", "memoryBytes": 8 * 1024**3},
-    "k6": {"cpusetCpus": "6-7", "memoryBytes": 4 * 1024**3},
-}
-
-
 class TrialError(Exception):
     """The control plane could not run or record a Trial."""
 
@@ -139,6 +138,21 @@ def evaluate_validity(metrics: dict[str, Any]) -> dict[str, Any]:
         reasons.append("k6_cpu_saturated")
     if not bool(metrics.get("k6CpuObserved", True)):
         reasons.append("k6_cpu_observation_failed")
+    telemetry = metrics.get("mandatoryTelemetry")
+    if telemetry is not None:
+        resources = telemetry.get("resourceTelemetry", {})
+        if not bool(resources.get("contender", {}).get("observed")):
+            reasons.append("contender_resource_telemetry_missing")
+        if not bool(resources.get("postgres", {}).get("observed")):
+            reasons.append("postgres_resource_telemetry_missing")
+        if not bool(telemetry.get("postgresTelemetry", {}).get("observed")):
+            reasons.append("postgres_activity_telemetry_missing")
+    host_execution = metrics.get("hostExecution")
+    if host_execution is not None:
+        if not bool(host_execution.get("observed")):
+            reasons.append("host_execution_evidence_missing")
+        else:
+            reasons.extend(str(reason) for reason in host_execution.get("reasons", []))
     return {"valid": not reasons, "reasons": reasons}
 
 
@@ -252,26 +266,36 @@ def _container_limits(container: str) -> dict[str, Any]:
 
 
 def _environment_fingerprint(
-    root: Path, contender: dict[str, Any], *, k6_limits: dict[str, Any]
+    root: Path,
+    contender: dict[str, Any],
+    *,
+    k6_limits: dict[str, Any] | None,
+    host_observation: dict[str, Any],
 ) -> dict[str, Any]:
     memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     names = _resource_names(root, contender["id"])
-    return {
+    containers = {
+        "contender": _container_limits(names.contender),
+        "postgres": _container_limits(names.database),
+    }
+    if k6_limits is not None:
+        containers["k6"] = k6_limits
+    fingerprint = {
         "resourceProfile": contender["resourceProfile"],
+        "resourceProfileDefinition": LOCAL_RESOURCE_PROFILE,
         "hostname": platform.node(),
         "kernel": platform.release(),
         "machine": platform.machine(),
+        "cpuModel": host_observation.get("cpuModel"),
         "python": platform.python_version(),
         "cpus": os.cpu_count(),
         "memoryBytes": memory,
-        "k6Image": K6_IMAGE,
         "postgresImage": POSTGRES_IMAGE,
-        "containers": {
-            "contender": _container_limits(names.contender),
-            "postgres": _container_limits(names.database),
-            "k6": k6_limits,
-        },
+        "containers": containers,
     }
+    if k6_limits is not None:
+        fingerprint["k6Image"] = K6_IMAGE
+    return fingerprint
 
 
 def _contender_base_url(root: Path, contender_id: str) -> str:
@@ -310,6 +334,52 @@ def _docker_bytes(value: str) -> int:
     return round(float(match.group(1)) * _DOCKER_SIZE_UNITS[match.group(2)])
 
 
+def _keyed_cgroup_file(path: Path) -> dict[str, int]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        return {
+            key: int(value)
+            for line in lines
+            for key, value in [line.split(None, 1)]
+        }
+    except (OSError, UnicodeError, ValueError):
+        return {}
+
+
+def _container_cgroup_metrics(container: str) -> dict[str, Any] | None:
+    """Read exact cgroup-v2 CPU time and anonymous/shared resident memory."""
+    try:
+        pid = int(_container_document(container)["State"]["Pid"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        cgroup_lines = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    unified = next((line.split("::", 1)[1] for line in cgroup_lines if line.startswith("0::")), None)
+    if unified is None:
+        return None
+    relative = Path(unified.lstrip("/"))
+    if ".." in relative.parts:
+        return None
+    cgroup = Path("/sys/fs/cgroup") / relative
+    cpu = _keyed_cgroup_file(cgroup / "cpu.stat")
+    memory = _keyed_cgroup_file(cgroup / "memory.stat")
+    if "usage_usec" not in cpu or "anon" not in memory or "file_mapped" not in memory:
+        return None
+    return {
+        "cpuUsageSeconds": cpu["usage_usec"] / 1_000_000,
+        "residentMemoryBytes": (
+            memory["anon"] + memory["file_mapped"] + memory.get("shmem", 0)
+        ),
+        "residentMemoryDefinition": (
+            "cgroup-v2 memory.stat anon + file_mapped + shmem"
+        ),
+    }
+
+
 def _resource_sample(containers: list[str]) -> dict[str, dict[str, Any]]:
     raw = _docker(
         "stats",
@@ -325,12 +395,14 @@ def _resource_sample(containers: list[str]) -> dict[str, dict[str, Any]]:
     try:
         for line in raw.stdout.splitlines():
             item = json.loads(line)
-            memory_usage, _ = item["MemUsage"].split("/", 1)
             network_received, network_sent = item["NetIO"].split("/", 1)
             block_read, block_written = item["BlockIO"].split("/", 1)
+            cgroup = _container_cgroup_metrics(item["Name"])
+            if cgroup is None:
+                continue
             samples[item["Name"]] = {
                 "cpuPercent": float(item["CPUPerc"].strip().rstrip("%")),
-                "residentMemoryBytes": _docker_bytes(memory_usage),
+                **cgroup,
                 "networkReceivedBytes": _docker_bytes(network_received),
                 "networkSentBytes": _docker_bytes(network_sent),
                 "blockReadBytes": _docker_bytes(block_read),
@@ -391,6 +463,41 @@ WHERE datname = current_database();
         return {"observed": False, "error": "PostgreSQL returned invalid telemetry JSON"}
 
 
+def _postgres_lock_snapshot(container: str) -> dict[str, int] | None:
+    query = """
+SELECT json_build_object(
+  'granted', count(*) FILTER (WHERE granted),
+  'waiting', count(*) FILTER (WHERE NOT granted)
+)
+FROM pg_catalog.pg_locks
+WHERE pid IS DISTINCT FROM pg_backend_pid();
+"""
+    result = _docker(
+        "exec",
+        container,
+        "psql",
+        "--username",
+        CONTROL_ROLE,
+        "--dbname",
+        DATABASE_NAME,
+        "--tuples-only",
+        "--no-align",
+        "--command",
+        query,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        values = json.loads(result.stdout.strip())
+        return {
+            "granted": int(values["granted"]),
+            "waiting": int(values["waiting"]),
+        }
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _summarize_resource_samples(
     samples: dict[str, list[tuple[float, dict[str, Any]]]]
 ) -> dict[str, Any]:
@@ -399,18 +506,24 @@ def _summarize_resource_samples(
         if not observations:
             summary[container] = {"observed": False}
             continue
-        cpu_seconds = 0.0
-        for (previous_at, _), (sampled_at, sample) in zip(observations, observations[1:]):
-            cpu_seconds += sample["cpuPercent"] / 100 * (sampled_at - previous_at)
+        if any(
+            "cpuUsageSeconds" not in sample or "residentMemoryBytes" not in sample
+            for _, sample in observations
+        ):
+            summary[container] = {"observed": False}
+            continue
         memories = [sample["residentMemoryBytes"] for _, sample in observations]
         first = observations[0][1]
         last = observations[-1][1]
         summary[container] = {
             "observed": True,
             "sampleCount": len(observations),
-            "cpuTimeSecondsEstimate": cpu_seconds,
+            "cpuTimeSeconds": max(
+                0.0, last["cpuUsageSeconds"] - first["cpuUsageSeconds"]
+            ),
             "averageResidentMemoryBytes": sum(memories) / len(memories),
             "peakResidentMemoryBytes": max(memories),
+            "residentMemoryDefinition": first.get("residentMemoryDefinition"),
             "networkBytes": {
                 "received": max(0, last["networkReceivedBytes"] - first["networkReceivedBytes"]),
                 "sent": max(0, last["networkSentBytes"] - first["networkSentBytes"]),
@@ -423,36 +536,94 @@ def _summarize_resource_samples(
     return summary
 
 
+def _summarize_postgres_telemetry(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    lock_samples: list[dict[str, int]] | None = None,
+) -> dict[str, Any]:
+    """Turn PostgreSQL cumulative counters into Trial-local activity evidence."""
+    sampled_locks = lock_samples or []
+    if not before.get("observed") or not after.get("observed"):
+        return {
+            "observed": False,
+            "before": before,
+            "after": after,
+        }
+    if lock_samples is not None and not sampled_locks:
+        return {
+            "observed": False,
+            "error": "PostgreSQL lock activity was not observed during measurement",
+            "before": before,
+            "after": after,
+        }
+    try:
+        first = before["values"]
+        last = after["values"]
+
+        def deltas(section: str) -> dict[str, int]:
+            return {
+                key: max(0, int(value) - int(first[section][key]))
+                for key, value in last[section].items()
+            }
+
+        return {
+            "observed": True,
+            "transactions": deltas("transactions"),
+            "locks": {
+                "before": {key: int(value) for key, value in first["locks"].items()},
+                "after": {key: int(value) for key, value in last["locks"].items()},
+                "sampleCount": len(sampled_locks),
+                "peakGranted": max(
+                    [int(item["granted"]) for item in sampled_locks]
+                    + [int(first["locks"]["granted"]), int(last["locks"]["granted"])]
+                ),
+                "peakWaiting": max(
+                    [int(item["waiting"]) for item in sampled_locks]
+                    + [int(first["locks"]["waiting"]), int(last["locks"]["waiting"])]
+                ),
+            },
+            "databaseBlocks": deltas("databaseBlocks"),
+            "ioOperations": deltas("ioOperations"),
+        }
+    except (KeyError, TypeError, ValueError):
+        return {
+            "observed": False,
+            "error": "PostgreSQL telemetry snapshots were incomplete",
+            "before": before,
+            "after": after,
+        }
+
+
+def _apply_container_profile(container: str, profile: dict[str, Any]) -> None:
+    _docker(
+        "update",
+        "--cpuset-cpus",
+        str(profile["cpusetCpus"]),
+        "--memory",
+        str(profile["memoryBytes"]),
+        "--memory-swap",
+        str(profile["memorySwapBytes"]),
+        container,
+    )
+    actual = _container_limits(container)
+    expected = {
+        "cpusetCpus": profile["cpusetCpus"],
+        "memoryBytes": profile["memoryBytes"],
+        "memorySwapBytes": profile["memorySwapBytes"],
+        "nanoCpus": 0,
+    }
+    if actual != expected:
+        raise TrialError(
+            f"container {container} does not match the official resource profile: "
+            f"expected {expected}, got {actual}"
+        )
+
+
 def _apply_official_resource_profile(root: Path, contender_id: str) -> None:
     """Apply the versioned local profile before an official measurement."""
     names = _resource_names(root, contender_id)
-    for container, profile in (
-        (names.contender, LOCAL_RESOURCE_PROFILE["contender"]),
-        (names.database, LOCAL_RESOURCE_PROFILE["postgres"]),
-    ):
-        memory = str(profile["memoryBytes"])
-        _docker(
-            "update",
-            "--cpuset-cpus",
-            str(profile["cpusetCpus"]),
-            "--memory",
-            memory,
-            "--memory-swap",
-            memory,
-            container,
-        )
-        actual = _container_limits(container)
-        expected = {
-            "cpusetCpus": profile["cpusetCpus"],
-            "memoryBytes": profile["memoryBytes"],
-            "memorySwapBytes": profile["memoryBytes"],
-            "nanoCpus": 0,
-        }
-        if actual != expected:
-            raise TrialError(
-                f"container {container} does not match the official resource profile: "
-                f"expected {expected}, got {actual}"
-            )
+    _apply_container_profile(names.contender, LOCAL_RESOURCE_PROFILE["contender"])
+    _apply_container_profile(names.database, LOCAL_RESOURCE_PROFILE["postgres"])
 
 
 def run_k6(
@@ -468,7 +639,14 @@ def run_k6(
     reference_tokens: ReferenceTokenCorpus | None,
     work_dir: Path,
     official: bool = False,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any] | None,
+    dict[str, Any],
+    list[dict[str, int]],
+]:
     """Run the pinned Scenario script against a Contender URL."""
     root = root.resolve()
     if scenario not in SCENARIOS:
@@ -531,7 +709,9 @@ def run_k6(
                 "--memory",
                 "4g",
                 "--memory-swap",
-                "4g",
+                str(LOCAL_RESOURCE_PROFILE["k6"]["memorySwapBytes"]),
+                "--memory-swappiness",
+                "0",
                 "--label",
                 "dev.link-metrics.control-plane=true",
                 "--volume",
@@ -565,13 +745,26 @@ def run_k6(
         if reference_tokens is not None:
             docker_arguments.extend(["--env", "TOKENS_PATH=/work/reference-tokens.json"])
         docker_arguments.extend([K6_IMAGE, "run", script.name])
+        telemetry_containers = {
+            "contender": names.contender,
+            "postgres": names.database,
+            "k6": container,
+        }
+        measured_containers = list(telemetry_containers.values())
+        resource_samples: dict[str, list[tuple[float, dict[str, Any]]]] = {
+            name: [] for name in measured_containers
+        }
+        baseline_at = time.monotonic()
+        baseline = _resource_sample([names.contender, names.database])
+        for name, values in baseline.items():
+            resource_samples[name].append((baseline_at, values))
         _docker(*docker_arguments)
         actual_k6_limits = _container_limits(container)
         if official:
             expected_k6_limits = {
                 "cpusetCpus": LOCAL_RESOURCE_PROFILE["k6"]["cpusetCpus"],
                 "memoryBytes": LOCAL_RESOURCE_PROFILE["k6"]["memoryBytes"],
-                "memorySwapBytes": LOCAL_RESOURCE_PROFILE["k6"]["memoryBytes"],
+                "memorySwapBytes": LOCAL_RESOURCE_PROFILE["k6"]["memorySwapBytes"],
                 "nanoCpus": 2_000_000_000,
             }
             if actual_k6_limits != expected_k6_limits:
@@ -582,15 +775,8 @@ def run_k6(
         peak_cpu = 0.0
         cpu_samples = 0
         cpu_sample_failures = 0
-        telemetry_containers = {
-            "contender": names.contender,
-            "postgres": names.database,
-            "k6": container,
-        }
-        measured_containers = list(telemetry_containers.values())
-        resource_samples: dict[str, list[tuple[float, dict[str, Any]]]] = {
-            name: [] for name in measured_containers
-        }
+        host_samples: list[dict[str, Any]] = []
+        lock_samples: list[dict[str, int]] = []
         deadline = time.monotonic() + duration_seconds + 120
         while time.monotonic() < deadline:
             document = _container_document(container)
@@ -598,6 +784,11 @@ def run_k6(
             sample = _resource_sample(measured_containers)
             for name, values in sample.items():
                 resource_samples[name].append((sampled_at, values))
+            host_samples.append(capture_host_observation(LOCAL_RESOURCE_PROFILE))
+            if official:
+                lock_sample = _postgres_lock_snapshot(names.database)
+                if lock_sample is not None:
+                    lock_samples.append(lock_sample)
             k6_sample = sample.get(container)
             if k6_sample is None:
                 cpu_sample_failures += 1
@@ -610,6 +801,11 @@ def run_k6(
         else:
             _docker("kill", container, check=False)
             raise TrialError("k6 did not finish within the Trial watchdog window")
+
+        final_at = time.monotonic()
+        final_sample = _resource_sample([names.contender, names.database])
+        for name, values in final_sample.items():
+            resource_samples[name].append((final_at, values))
 
         logs = _docker("logs", container, check=False)
         exit_code = int(document["State"].get("ExitCode", 1))
@@ -639,28 +835,46 @@ def run_k6(
         }, {
             role: summarized_resources[container_name]
             for role, container_name in telemetry_containers.items()
-        }, reference_tokens.evidence if reference_tokens is not None else None
+        }, reference_tokens.evidence if reference_tokens is not None else None, summarize_host_execution(
+            LOCAL_RESOURCE_PROFILE, host_samples
+        ), lock_samples
     finally:
         _remove_k6(root, contender_id)
 
 
-def _start_contender_container(root: Path, contender_id: str) -> None:
-    """Create a fresh Contender container against an already-running PostgreSQL."""
+def _contender_container_arguments(
+    root: Path,
+    contender_id: str,
+    *,
+    profile: dict[str, Any] | None = None,
+) -> list[str]:
     names = _resource_names(root, contender_id)
     contender = _find_manifest(root, contender_id)
-    if _container_exists(names.contender):
-        _docker("rm", "--force", names.contender)
     migration_version = _migration_version(root)
     database_url = (
         f"postgresql://{CONTENDER_ROLE}:{CONTENDER_PASSWORD}@postgres:5432/{DATABASE_NAME}"
     )
-    _docker(
-        "run",
-        "--detach",
+    arguments = [
         "--name",
         names.contender,
         "--network",
         names.network,
+    ]
+    if profile is not None:
+        arguments.extend(
+            [
+                "--cpuset-cpus",
+                str(profile["cpusetCpus"]),
+                "--memory",
+                str(profile["memoryBytes"]),
+                "--memory-swap",
+                str(profile["memorySwapBytes"]),
+                "--memory-swappiness",
+                "0",
+            ]
+        )
+    arguments.extend(
+        [
         "--label",
         "dev.link-metrics.control-plane=true",
         "--env",
@@ -672,7 +886,18 @@ def _start_contender_container(root: Path, contender_id: str) -> None:
         "--publish",
         f"127.0.0.1:0:{contender['port']}",
         names.image,
+        ]
     )
+    return arguments
+
+
+def _start_contender_container(root: Path, contender_id: str) -> None:
+    """Create a fresh Contender container against an already-running PostgreSQL."""
+    names = _resource_names(root, contender_id)
+    contender = _find_manifest(root, contender_id)
+    if _container_exists(names.contender):
+        _docker("rm", "--force", names.contender)
+    _docker("run", "--detach", *_contender_container_arguments(root, contender_id))
     document = _container_document(names.contender)
     _wait_for_readiness(_contender_url(document, contender["port"]))
 
@@ -750,6 +975,7 @@ def run_scenario_trial(
     elif reference_tokens is not None:
         raise TrialError(f"{scenario} does not use reference tokens")
     owns_stack = False
+    preflight = None
     try:
         owns_stack = _ensure_fresh_contender(root, contender_id)
         try:
@@ -762,6 +988,14 @@ def run_scenario_trial(
         base_url = _contender_base_url(root, contender_id)
         conformance = None
         if uses_official_resource_profile:
+            preflight = assess_host_preflight(
+                LOCAL_RESOURCE_PROFILE,
+                capture_host_observation(LOCAL_RESOURCE_PROFILE),
+            )
+            if not preflight["valid"]:
+                raise TrialError(
+                    "host preflight failed: " + ", ".join(preflight["reasons"])
+                )
             _apply_official_resource_profile(root, contender_id)
         if official:
             conformance = run_conformance_checks(root, contender_id, base_url)
@@ -789,7 +1023,14 @@ def run_scenario_trial(
         postgres_before = _postgres_activity_snapshot(
             _resource_names(root, contender_id).database
         )
-        summary, k6_health, resource_telemetry, token_evidence = run_k6(
+        (
+            summary,
+            k6_health,
+            resource_telemetry,
+            token_evidence,
+            host_execution,
+            lock_samples,
+        ) = run_k6(
             root,
             scenario=scenario,
             contender_id=contender_id,
@@ -805,6 +1046,9 @@ def run_scenario_trial(
         postgres_after = _postgres_activity_snapshot(
             _resource_names(root, contender_id).database
         )
+        postgres_telemetry = _summarize_postgres_telemetry(
+            postgres_before, postgres_after, lock_samples
+        )
         parsed = parse_k6_summary(summary)
         offered_iterations = rate * measure_seconds
         validity = evaluate_validity(
@@ -812,6 +1056,15 @@ def run_scenario_trial(
                 "droppedIterations": parsed["droppedIterations"],
                 "k6CpuSaturated": k6_health["saturated"],
                 "k6CpuObserved": k6_health["observed"],
+                "mandatoryTelemetry": (
+                    {
+                        "resourceTelemetry": resource_telemetry,
+                        "postgresTelemetry": postgres_telemetry,
+                    }
+                    if uses_official_resource_profile
+                    else None
+                ),
+                "hostExecution": host_execution if uses_official_resource_profile else None,
             }
         )
         names = _resource_names(root, contender_id)
@@ -840,9 +1093,16 @@ def run_scenario_trial(
                         root,
                         contender,
                         k6_limits=k6_health["containerLimits"],
+                        host_observation=(
+                            preflight["observation"]
+                            if preflight is not None
+                            else capture_host_observation(LOCAL_RESOURCE_PROFILE)
+                        ),
                     ),
                     "k6Image": K6_IMAGE,
                     "postgresImage": POSTGRES_IMAGE,
+                    "preflight": preflight,
+                    "execution": host_execution,
                 },
                 "lifecycle": {
                     "warmSeconds": warm_seconds,
@@ -865,10 +1125,7 @@ def run_scenario_trial(
                     "checksPassed": parsed["checksPassed"],
                     "checksFailed": parsed["checksFailed"],
                     "resourceTelemetry": resource_telemetry,
-                    "postgresTelemetry": {
-                        "before": postgres_before,
-                        "after": postgres_after,
-                    },
+                    "postgresTelemetry": postgres_telemetry,
                 },
                 "validity": {
                     **validity,
