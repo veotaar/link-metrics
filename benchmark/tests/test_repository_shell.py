@@ -20,6 +20,7 @@ def test_repository_exposes_versioned_authority_seams_and_local_contenders() -> 
     assert (REPOSITORY_ROOT / "database/migrations").is_dir()
     assert (REPOSITORY_ROOT / "database/schema.sql").is_file()
     assert (REPOSITORY_ROOT / "backends/express-node/drizzle/schema.ts").is_file()
+    assert (REPOSITORY_ROOT / "backends/hono-bun/drizzle/schema.ts").is_file()
     assert (REPOSITORY_ROOT / "backends/nest-node/drizzle/schema.ts").is_file()
     assert not (REPOSITORY_ROOT / "packages/api-contract/openapi.yaml").exists()
     assert not (REPOSITORY_ROOT / "packages/db-migrations/package.json").exists()
@@ -54,6 +55,20 @@ def test_repository_exposes_versioned_authority_seams_and_local_contenders() -> 
             "port": 3000,
             "resourceProfile": "local-7800x3d",
             "runtime": {"name": "Node.js", "version": "26.2.0"},
+            "schemaVersion": 1,
+            "workers": {"count": 1, "model": "single-process"},
+        },
+        {
+            "apiContractVersion": "1.0.1",
+            "container": {"context": ".", "dockerfile": "Dockerfile"},
+            "displayName": "Hono on Bun",
+            "framework": {"name": "Hono", "version": "4.12.31"},
+            "id": "hono-bun",
+            "language": {"name": "TypeScript", "version": "7.0.2"},
+            "manifest": "backends/hono-bun/contender.yaml",
+            "port": 3000,
+            "resourceProfile": "local-7800x3d",
+            "runtime": {"name": "Bun", "version": "1.3.14"},
             "schemaVersion": 1,
             "workers": {"count": 1, "model": "single-process"},
         },

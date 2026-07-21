@@ -76,6 +76,14 @@ def read_container_logs(container: str) -> str:
     return result.stdout + result.stderr
 
 
+def database_statement_lines(logs: str) -> list[str]:
+    return [
+        line
+        for line in logs.splitlines()
+        if re.search(r"\bLOG:\s+(?:statement:|execute )", line)
+    ]
+
+
 def read_health(url: str) -> tuple[int, bytes, str]:
     try:
         with urllib.request.urlopen(url, timeout=5) as response:
@@ -571,11 +579,7 @@ def test_short_link_creation_uses_one_autocommit_read_committed_statement() -> N
         assert response[0] == 201
         assert logs_after.startswith(logs_before)
         request_logs = logs_after[len(logs_before) :]
-        statement_lines = [
-            line
-            for line in request_logs.splitlines()
-            if "statement:" in line or "execute <unnamed>:" in line
-        ]
+        statement_lines = database_statement_lines(request_logs)
         assert len(statement_lines) == 1, request_logs
         assert 'insert into "links"' in request_logs
         assert "returning" in request_logs
@@ -737,11 +741,7 @@ def test_short_link_resolution_uses_one_atomic_autocommit_statement() -> None:
         assert response == (302, b"", destination)
         assert logs_after.startswith(logs_before)
         request_logs = logs_after[len(logs_before) :]
-        statement_lines = [
-            line
-            for line in request_logs.splitlines()
-            if "statement:" in line or "execute <unnamed>:" in line
-        ]
+        statement_lines = database_statement_lines(request_logs)
         assert len(statement_lines) == 1, request_logs
         assert "UPDATE links" in request_logs
         assert "click_count = click_count + 1" in request_logs
@@ -881,11 +881,7 @@ def test_short_link_statistics_use_one_autocommit_read_committed_select() -> Non
         assert statistics[0] == 200
         assert logs_after.startswith(logs_before)
         request_logs = logs_after[len(logs_before) :]
-        statement_lines = [
-            line
-            for line in request_logs.splitlines()
-            if "statement:" in line or "execute <unnamed>:" in line
-        ]
+        statement_lines = database_statement_lines(request_logs)
         assert len(statement_lines) == 1, request_logs
         assert "SELECT" in request_logs
         assert "FROM links" in request_logs
@@ -1091,11 +1087,7 @@ def test_login_uses_one_autocommit_read_committed_lookup() -> None:
         assert response[0] == 200
         assert logs_after.startswith(logs_before)
         request_logs = logs_after[len(logs_before) :]
-        statement_lines = [
-            line
-            for line in request_logs.splitlines()
-            if "statement:" in line or "execute <unnamed>:" in line
-        ]
+        statement_lines = database_statement_lines(request_logs)
         assert len(statement_lines) == 1, request_logs
         assert "SELECT id, password_hash" in request_logs
         assert "statement: BEGIN" not in request_logs
@@ -1435,11 +1427,7 @@ def test_registration_uses_one_autocommit_read_committed_statement() -> None:
         assert response[0] == 201
         assert logs_after.startswith(logs_before)
         request_logs = logs_after[len(logs_before) :]
-        statement_lines = [
-            line
-            for line in request_logs.splitlines()
-            if "statement:" in line or "execute <unnamed>:" in line
-        ]
+        statement_lines = database_statement_lines(request_logs)
         assert len(statement_lines) == 1, request_logs
         assert "INSERT INTO users" in request_logs
         assert "RETURNING" in request_logs
