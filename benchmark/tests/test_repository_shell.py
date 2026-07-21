@@ -57,3 +57,50 @@ def test_repository_exposes_versioned_authority_seams_and_local_contenders() -> 
             "workers": {"count": 1, "model": "single-process"},
         }
     ]
+
+
+def test_hosted_ci_is_a_discovery_driven_correctness_gate() -> None:
+    workflow_path = REPOSITORY_ROOT / ".github/workflows/ci.yml"
+    workflow_source = workflow_path.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(workflow_source)
+    jobs = workflow["jobs"]
+
+    discovery = jobs["discover-contenders"]
+    assert discovery["outputs"]["contenders"] == "${{ steps.discover.outputs.contenders }}"
+    assert "contenders discover" in workflow_source
+    assert "map(.id)" in workflow_source
+
+    contender_gate = jobs["contender-correctness"]
+    assert contender_gate["needs"] == ["discover-contenders", "authorities"]
+    assert contender_gate["strategy"]["matrix"]["contender"] == (
+        "${{ fromJSON(needs.discover-contenders.outputs.contenders) }}"
+    )
+
+    required_commands = (
+        "pnpm build",
+        "pnpm check-types",
+        "pnpm lint",
+        "link-metrics contract lint",
+        "uv run pytest",
+        "LINK_METRICS_TEST_FULL_DATASET: \"1\"",
+        "dbmate",
+        "git diff --exit-code -- database/schema.sql",
+        'scripts["db:introspect"]',
+        "git diff --exit-code -- backends",
+        'contenders conform "${{ matrix.contender }}"',
+        'dataset build "${{ matrix.contender }}"',
+        'trial smoke "${{ matrix.contender }}"',
+        "bundle[\"official\"] is False",
+        "bundle[\"mode\"] == \"smoke\"",
+    )
+    for command in required_commands:
+        assert command in workflow_source
+
+    forbidden_official_commands = (
+        "trial run",
+        "capacity run",
+        "startup run",
+        "report generate",
+    )
+    for command in forbidden_official_commands:
+        assert command not in workflow_source
