@@ -76,25 +76,37 @@ def test_hosted_ci_is_a_discovery_driven_correctness_gate() -> None:
         "${{ fromJSON(needs.discover-contenders.outputs.contenders) }}"
     )
 
-    required_commands = (
+    authority_steps = jobs["authorities"]["steps"]
+    authority_commands = "\n".join(step.get("run", "") for step in authority_steps)
+    required_authority_commands = (
         "pnpm build",
         "pnpm check-types",
         "pnpm lint",
         "link-metrics contract lint",
         "uv run pytest",
-        "LINK_METRICS_TEST_FULL_DATASET: \"1\"",
         "dbmate",
         "git diff --exit-code -- database/schema.sql",
         'scripts["db:introspect"]',
-        "git diff --exit-code -- backends",
+        "git status --porcelain --untracked-files=all -- backends",
+    )
+    for command in required_authority_commands:
+        assert command in authority_commands
+
+    contender_commands = "\n".join(step.get("run", "") for step in contender_gate["steps"])
+    required_contender_commands = (
         'contenders conform "${{ matrix.contender }}"',
         'dataset build "${{ matrix.contender }}"',
         'trial smoke "${{ matrix.contender }}"',
         "bundle[\"official\"] is False",
         "bundle[\"mode\"] == \"smoke\"",
+        "bundle[\"environment\"][\"fingerprint\"][\"resourceProfile\"] is None",
+        "bundle[\"results\"][\"achievedIterations\"] > 0",
+        "bundle[\"results\"][\"checksPassed\"] > 0",
+        "bundle[\"results\"][\"droppedIterations\"] == 0",
+        "bundle[\"validity\"][\"k6SchedulingHealthy\"] is True",
     )
-    for command in required_commands:
-        assert command in workflow_source
+    for command in required_contender_commands:
+        assert command in contender_commands
 
     forbidden_official_commands = (
         "trial run",

@@ -191,6 +191,8 @@ def test_registration_smoke_trial_writes_a_nonofficial_bundle(tmp_path: Path) ->
         assert output.is_file()
         assert bundle["official"] is False
         assert bundle["mode"] == "smoke"
+        assert bundle["environment"]["fingerprint"]["resourceProfile"] is None
+        assert bundle["environment"]["fingerprint"]["resourceProfileDefinition"] is None
         assert bundle["scenario"] == "registration"
         assert bundle["lifecycle"]["warmSeconds"] == SMOKE_WARM_SECONDS
         assert bundle["lifecycle"]["measureSeconds"] == SMOKE_MEASURE_SECONDS

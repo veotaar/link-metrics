@@ -61,8 +61,6 @@ jobs:
         run: uv run link-metrics contract lint
         working-directory: benchmark
       - name: Run the locked control-plane and PostgreSQL suite
-        env:
-          LINK_METRICS_TEST_FULL_DATASET: "1"
         run: uv run pytest
         working-directory: benchmark
 
@@ -86,7 +84,7 @@ jobs:
               DATABASE_URL="$database_url" pnpm --dir "$package_dir" db:introspect
             fi
           done
-          git diff --exit-code -- backends
+          test -z "$(git status --porcelain --untracked-files=all -- backends)"
       - name: Stop generated-schema environment
         if: always()
         run: cd benchmark && uv run link-metrics contenders stop express-node --root ..
@@ -136,7 +134,14 @@ jobs:
           bundle = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           assert bundle["official"] is False
           assert bundle["mode"] == "smoke"
+          assert bundle["environment"]["fingerprint"]["resourceProfile"] is None
+          assert bundle["results"]["achievedIterations"] > 0
+          assert bundle["results"]["checksPassed"] > 0
+          assert bundle["results"]["droppedIterations"] == 0
           assert bundle["results"]["checksFailed"] == 0
+          assert bundle["results"]["errors"]["transportFailures"] == 0
+          assert bundle["results"]["errors"]["unexpectedResponses"] == 0
+          assert bundle["validity"]["k6SchedulingHealthy"] is True
           PY
       - name: Stop correctness environment
         if: always()

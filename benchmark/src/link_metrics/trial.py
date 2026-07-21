@@ -271,6 +271,7 @@ def _environment_fingerprint(
     *,
     k6_limits: dict[str, Any] | None,
     host_observation: dict[str, Any],
+    resource_profile: dict[str, Any] | None,
 ) -> dict[str, Any]:
     memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     names = _resource_names(root, contender["id"])
@@ -281,8 +282,8 @@ def _environment_fingerprint(
     if k6_limits is not None:
         containers["k6"] = k6_limits
     fingerprint = {
-        "resourceProfile": contender["resourceProfile"],
-        "resourceProfileDefinition": LOCAL_RESOURCE_PROFILE,
+        "resourceProfile": resource_profile["id"] if resource_profile is not None else None,
+        "resourceProfileDefinition": resource_profile,
         "hostname": platform.node(),
         "kernel": platform.release(),
         "machine": platform.machine(),
@@ -1097,6 +1098,9 @@ def run_scenario_trial(
                             preflight["observation"]
                             if preflight is not None
                             else capture_host_observation(LOCAL_RESOURCE_PROFILE)
+                        ),
+                        resource_profile=(
+                            LOCAL_RESOURCE_PROFILE if uses_official_resource_profile else None
                         ),
                     ),
                     "k6Image": K6_IMAGE,

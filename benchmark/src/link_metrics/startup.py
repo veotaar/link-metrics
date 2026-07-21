@@ -254,6 +254,7 @@ def run_cold_startup(root: Path, contender_id: str, *, output: Path) -> dict[str
                     contender,
                     k6_limits=None,
                     host_observation=preflight["observation"],
+                    resource_profile=LOCAL_RESOURCE_PROFILE,
                 )
             host_observations.append(capture_host_observation(LOCAL_RESOURCE_PROFILE))
             _docker("start", container)
