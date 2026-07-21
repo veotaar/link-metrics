@@ -62,7 +62,8 @@ or frequency and thermal excursions invalidate a Trial without deleting its raw 
 
 ```sh
 uv run link-metrics dataset build express-node --root ..
-uv run link-metrics trial smoke express-node --output /tmp/registration-smoke.json --root ..
+uv run link-metrics trial smoke express-node --scenario registration \
+  --output /tmp/registration-smoke.json --root ..
 uv run link-metrics trial run express-node --scenario registration --rate 10 \
   --output /tmp/registration-trial.json --root ..
 uv run link-metrics trial run express-node --scenario statistics --rate 10 \

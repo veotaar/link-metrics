@@ -171,6 +171,14 @@ def test_trial_cli_accepts_every_success_path_scenario(scenario: str) -> None:
     assert "invalid choice" not in result.stderr
 
 
+def test_smoke_cli_exposes_every_success_path_scenario() -> None:
+    result = run_trial("smoke", "--help")
+
+    assert result.returncode == 0
+    for scenario in SCENARIO_CONFIGURATIONS:
+        assert scenario in result.stdout
+
+
 @pytest.mark.skipif(
     not TRIAL_E2E_ENABLED,
     reason="set LINK_METRICS_TEST_TRIAL=1 for end-to-end registration smoke",

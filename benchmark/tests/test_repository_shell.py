@@ -13,13 +13,14 @@ def test_repository_exposes_versioned_authority_seams_and_local_contenders() -> 
     workspace = yaml.safe_load((REPOSITORY_ROOT / "pnpm-workspace.yaml").read_text(encoding="utf-8"))
 
     assert workspace == {
-        "allowBuilds": {"esbuild": True},
+        "allowBuilds": {"@nestjs/core": True, "esbuild": True},
         "packages": ["backends/*", "packages/*"],
     }
     assert (REPOSITORY_ROOT / "contracts/http/openapi.yaml").is_file()
     assert (REPOSITORY_ROOT / "database/migrations").is_dir()
     assert (REPOSITORY_ROOT / "database/schema.sql").is_file()
     assert (REPOSITORY_ROOT / "backends/express-node/drizzle/schema.ts").is_file()
+    assert (REPOSITORY_ROOT / "backends/nest-node/drizzle/schema.ts").is_file()
     assert not (REPOSITORY_ROOT / "packages/api-contract/openapi.yaml").exists()
     assert not (REPOSITORY_ROOT / "packages/db-migrations/package.json").exists()
     assert (REPOSITORY_ROOT / "benchmark/protocol/VERSION").read_text(encoding="utf-8").strip() == "3.0.0"
@@ -55,7 +56,21 @@ def test_repository_exposes_versioned_authority_seams_and_local_contenders() -> 
             "runtime": {"name": "Node.js", "version": "26.2.0"},
             "schemaVersion": 1,
             "workers": {"count": 1, "model": "single-process"},
-        }
+        },
+        {
+            "apiContractVersion": "1.0.1",
+            "container": {"context": ".", "dockerfile": "Dockerfile"},
+            "displayName": "NestJS with Express on Node.js",
+            "framework": {"name": "NestJS (Express adapter)", "version": "11.1.11"},
+            "id": "nest-node",
+            "language": {"name": "TypeScript", "version": "7.0.2"},
+            "manifest": "backends/nest-node/contender.yaml",
+            "port": 3000,
+            "resourceProfile": "local-7800x3d",
+            "runtime": {"name": "Node.js", "version": "26.2.0"},
+            "schemaVersion": 1,
+            "workers": {"count": 1, "model": "single-process"},
+        },
     ]
 
 

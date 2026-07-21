@@ -26,19 +26,20 @@ def run_control_plane(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_express_passes_the_mandatory_conformance_gate() -> None:
-    result = run_control_plane("contenders", "conform", "express-node")
+@pytest.mark.parametrize("contender_id", ["express-node", "nest-node"])
+def test_contender_passes_the_mandatory_conformance_gate(contender_id: str) -> None:
+    result = run_control_plane("contenders", "conform", contender_id)
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert json.loads(result.stdout) == {
         "apiContractVersion": "1.0.1",
         "checks": ["deterministic", "schemathesis"],
         "conforming": True,
-        "contenderId": "express-node",
+        "contenderId": contender_id,
         "eligible": True,
     }
 
-    inspected = run_control_plane("contenders", "inspect", "express-node")
+    inspected = run_control_plane("contenders", "inspect", contender_id)
     assert inspected.returncode == 2
     assert "is not started" in inspected.stderr
 

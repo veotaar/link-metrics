@@ -85,6 +85,7 @@ def _parser() -> argparse.ArgumentParser:
         help="run a short nonofficial registration smoke Trial",
     )
     smoke.add_argument("contender_id")
+    smoke.add_argument("--scenario", choices=SCENARIOS, default="registration")
     smoke.add_argument("--output", type=Path, required=True)
     smoke.add_argument("--repetition", type=int, default=1)
     smoke.add_argument("--root", type=Path, default=Path.cwd())
@@ -190,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             output = run_scenario_trial(
                 args.root.resolve(),
                 args.contender_id,
-                scenario="registration",
+                scenario=args.scenario,
                 output=args.output.resolve(),
                 mode="smoke",
                 repetition=args.repetition,

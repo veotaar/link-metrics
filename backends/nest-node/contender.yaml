@@ -1,0 +1,21 @@
+schemaVersion: 1
+id: nest-node
+displayName: NestJS with Express on Node.js
+apiContractVersion: 1.0.1
+language:
+  name: TypeScript
+  version: 7.0.2
+runtime:
+  name: Node.js
+  version: 26.2.0
+framework:
+  name: NestJS (Express adapter)
+  version: 11.1.11
+container:
+  context: .
+  dockerfile: Dockerfile
+port: 3000
+workers:
+  model: single-process
+  count: 1
+resourceProfile: local-7800x3d

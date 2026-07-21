@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import os
 import re
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from urllib.parse import urlsplit
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-CONTENDER_ID = "express-node"
+CONTENDER_ID = os.environ.get("LINK_METRICS_TEST_CONTENDER", "express-node")
 PUBLIC_BENCHMARK_JWT_KEY = (
     REPOSITORY_ROOT / "benchmark" / "fixtures" / "jwt-hs256.key"
 ).read_bytes().strip()
