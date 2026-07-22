@@ -64,6 +64,13 @@ def test_scenario_script_keeps_large_workload_streams_shared_between_vus() -> No
         assert f'"{stream}"' in script
 
 
+def test_scenario_script_groups_dynamic_urls_into_bounded_metric_series() -> None:
+    script = (REPOSITORY_ROOT / SCENARIO_SCRIPT).read_text(encoding="utf-8")
+
+    assert 'name: `${baseUrl}/:shortCode`' in script
+    assert 'name: `${baseUrl}/api/links/:shortCode/stats`' in script
+
+
 def test_scenario_script_archives_under_pinned_k6(tmp_path: Path) -> None:
     version = subprocess.run(
         ["docker", "run", "--rm", K6_IMAGE, "version"],

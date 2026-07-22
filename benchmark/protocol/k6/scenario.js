@@ -268,7 +268,7 @@ function resolution(iteration, accessPattern) {
   const response = http.get(`${baseUrl}/${shortCode}`, {
     redirects: 0,
     timeout: "5s",
-    tags: { scenario },
+    tags: { name: `${baseUrl}/:shortCode`, scenario },
   });
   scenarioDuration.add(response.timings.duration);
   if (!responseStarted(response)) return true;
@@ -287,7 +287,7 @@ function statistics(iteration) {
       Authorization: `Bearer ${entry.token}`,
     },
     timeout: "5s",
-    tags: { scenario },
+    tags: { name: `${baseUrl}/api/links/:shortCode/stats`, scenario },
   });
   scenarioDuration.add(response.timings.duration);
   if (!responseStarted(response)) return true;
