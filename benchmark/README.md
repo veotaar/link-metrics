@@ -87,15 +87,20 @@ For quick local comparisons, `lite run` is an exploratory instrument rather than
 smaller official protocol. It defaults to every discovered Contender and the
 `short-link-creation` and `uniform-resolution` Scenarios. Each Contender passes the
 conformance gate once, then each selected Scenario uses 15-second adaptive calibration
-samples and one 45-second confirmation measurement. Lite Trials retain the same Benchmark
+samples to reach a passing/failing bracket no wider than 5%, followed by one 45-second
+confirmation measurement. Lite Trials retain the same Benchmark
 Dataset, request validation, container limits, and resource telemetry as official Trials,
 but host frequency and thermal excursions are warnings rather than blockers.
 
-Lite mode prints a terminal table and removes its temporary Trial bundles when it exits. Its
-results are prominently marked non-publishable and cannot be consumed by Result Series
-reporting or verification. `--scenario` is repeatable. The two-hour default budget is also
-the maximum; expiration prevents the next atomic Trial from starting, while an active Trial
-is allowed to finish and clean up.
+Lite mode prints a terminal table with the capacity bracket, confirmation diagnostics, and
+an exact Contender/Scenario job counter. It retains `lite-results.json` and every raw Trial
+bundle under `benchmark/results/lite/<UTC-run-id>/`; this local evidence directory is ignored
+by Git so people and agents can inspect it without committing generated results. An aborted
+run also writes `failure.json` beside its completed Trial bundles. Use `--output` to select a
+different directory. Results remain prominently marked non-publishable and cannot be
+consumed by Result Series reporting or verification. `--scenario` is repeatable. The
+two-hour default budget is also the maximum; expiration prevents the next atomic Trial from
+starting, while an active Trial is allowed to finish and clean up.
 
 Before a Contender's first lite Trial, the control plane prepares its immutable PostgreSQL
 template automatically. Existing templates are reused, and new contender-local templates

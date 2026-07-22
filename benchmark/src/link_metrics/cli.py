@@ -171,6 +171,14 @@ def _parser() -> argparse.ArgumentParser:
         default=2,
         help="stop starting Trials after this wall-clock budget (maximum: 2)",
     )
+    lite_run.add_argument(
+        "--output",
+        type=Path,
+        help=(
+            "directory for the summary and raw Trial bundles "
+            "(default: benchmark/results/lite/<UTC-run-id>)"
+        ),
+    )
     lite_run.add_argument("--root", type=Path, default=Path.cwd())
 
     report = groups.add_parser("report", help="regenerate Result Series reports")
@@ -277,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
                 scenarios=args.scenario or DEFAULT_LITE_SCENARIOS,
                 max_hours=args.max_hours,
                 progress=lambda message: print(message, file=sys.stderr, flush=True),
+                work_directory=args.output.resolve() if args.output is not None else None,
             )
         elif args.group == "report":
             output = write_reports(
