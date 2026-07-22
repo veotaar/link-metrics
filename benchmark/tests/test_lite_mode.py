@@ -7,6 +7,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from link_metrics import cli
 from link_metrics.lite import (
     DEFAULT_LITE_SCENARIOS,
     calibrate_lite_capacity,
@@ -119,6 +122,7 @@ def test_lite_exploration_conforms_each_contender_once_and_confirms_each_scenari
         ["express-node", "hono-bun"],
         scenarios=DEFAULT_LITE_SCENARIOS,
         trial_runner=run_trial,
+        template_preparer=lambda root, contender_id: None,
         work_directory=tmp_path,
     )
 
@@ -153,6 +157,7 @@ def test_lite_exploration_stops_starting_trials_when_budget_expires(tmp_path: Pa
         ["express-node"],
         scenarios=["short-link-creation"],
         trial_runner=run_trial,
+        template_preparer=lambda root, contender_id: None,
         budget=ExecutionBudget(maximum_units=2),
         work_directory=tmp_path,
     )
@@ -160,6 +165,126 @@ def test_lite_exploration_stops_starting_trials_when_budget_expires(tmp_path: Pa
     assert result["status"] == "budget-exhausted"
     assert result["results"] == []
     assert calls == 2
+
+
+def test_lite_prepares_each_contenders_cached_template_once_before_its_first_trial(
+    tmp_path: Path,
+) -> None:
+    events: list[tuple[str, str]] = []
+
+    def prepare(root: Path, contender_id: str) -> None:
+        assert root == REPOSITORY_ROOT
+        events.append(("prepare", contender_id))
+
+    def run_trial(
+        root: Path,
+        contender_id: str,
+        *,
+        scenario: str,
+        mode: str,
+        offered_rate: float,
+        **kwargs: object,
+    ) -> dict[str, Any]:
+        del root, kwargs
+        events.append(("trial", contender_id))
+        return lite_bundle(
+            contender_id,
+            scenario,
+            offered_rate,
+            passed=offered_rate <= 100,
+            mode=mode,
+        )
+
+    run_lite_exploration(
+        REPOSITORY_ROOT,
+        ["express-node", "elysia-bun"],
+        scenarios=["short-link-creation"],
+        trial_runner=run_trial,
+        template_preparer=prepare,
+        work_directory=tmp_path,
+    )
+
+    assert [event for event in events if event[0] == "prepare"] == [
+        ("prepare", "express-node"),
+        ("prepare", "elysia-bun"),
+    ]
+    for contender_id in ("express-node", "elysia-bun"):
+        assert events.index(("prepare", contender_id)) < events.index(("trial", contender_id))
+
+
+def test_lite_reports_template_and_trial_progress(tmp_path: Path) -> None:
+    progress: list[str] = []
+
+    def run_trial(
+        root: Path,
+        contender_id: str,
+        *,
+        scenario: str,
+        mode: str,
+        offered_rate: float,
+        **kwargs: object,
+    ) -> dict[str, Any]:
+        del root, kwargs
+        return lite_bundle(
+            contender_id,
+            scenario,
+            offered_rate,
+            passed=offered_rate <= 64,
+            mode=mode,
+        )
+
+    run_lite_exploration(
+        REPOSITORY_ROOT,
+        ["express-node"],
+        scenarios=["short-link-creation"],
+        trial_runner=run_trial,
+        template_preparer=lambda root, contender_id: None,
+        progress=progress.append,
+        work_directory=tmp_path,
+    )
+
+    assert progress[0] == "Preparing express-node dataset template"
+    assert "Running express-node / short-link-creation: calibration at 64 req/s" in progress
+    assert "Finished express-node / short-link-creation: calibration at 64 req/s" in progress
+    assert "Running express-node / short-link-creation: confirmation at 64 req/s" in progress
+    assert progress[-1] == "Finished express-node / short-link-creation: confirmation at 64 req/s"
+
+
+def test_lite_cli_streams_progress_to_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def run_lite(*args: object, **kwargs: object) -> dict[str, Any]:
+        del args
+        kwargs["progress"]("Running hono-bun / short-link-creation: calibration at 64 req/s")
+        return {
+            "kind": "lite-results",
+            "status": "budget-exhausted",
+            "publishable": False,
+            "configuration": {
+                "calibrationMeasureSeconds": 15,
+                "confirmationMeasureSeconds": 45,
+            },
+            "results": [],
+        }
+
+    monkeypatch.setattr(cli, "run_lite_exploration", run_lite)
+
+    assert cli.main(
+        [
+            "lite",
+            "run",
+            "hono-bun",
+            "--scenario",
+            "short-link-creation",
+            "--root",
+            str(REPOSITORY_ROOT),
+        ]
+    ) == 0
+
+    captured = capsys.readouterr()
+    assert "Running hono-bun / short-link-creation" in captured.err
+    assert "Exploratory results" in captured.out
 
 
 def test_lite_terminal_output_is_prominently_nonpublishable() -> None:

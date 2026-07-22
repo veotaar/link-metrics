@@ -6,11 +6,57 @@ from pathlib import Path
 
 import pytest
 
+from link_metrics import dataset_runtime
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CONTENDER_ID = "express-node"
 SECOND_CONTENDER_ID = "nest-node"
 FULL_DATASET_ENABLED = os.environ.get("LINK_METRICS_TEST_FULL_DATASET") == "1"
+
+
+def test_build_runtime_starts_a_missing_contender_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(dataset_runtime, "_container_exists", lambda name: False)
+    monkeypatch.setattr(
+        dataset_runtime,
+        "start_contender",
+        lambda root, contender_id: events.append(("start", contender_id)),
+    )
+    monkeypatch.setattr(
+        dataset_runtime,
+        "build_template",
+        lambda root, contender_id: events.append(("build", contender_id)) or {"status": "reused"},
+    )
+
+    result = dataset_runtime.build_template_runtime(REPOSITORY_ROOT, "elysia-bun")
+
+    assert result == {"status": "reused"}
+    assert events == [("start", "elysia-bun"), ("build", "elysia-bun")]
+
+
+def test_build_runtime_resumes_an_existing_contender_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(dataset_runtime, "_container_exists", lambda name: True)
+    monkeypatch.setattr(
+        dataset_runtime,
+        "ensure_database_running",
+        lambda root, contender_id: events.append(("resume", contender_id)),
+    )
+    monkeypatch.setattr(
+        dataset_runtime,
+        "build_template",
+        lambda root, contender_id: events.append(("build", contender_id)) or {"status": "reused"},
+    )
+
+    result = dataset_runtime.build_template_runtime(REPOSITORY_ROOT, "elysia-bun")
+
+    assert result == {"status": "reused"}
+    assert events == [("resume", "elysia-bun"), ("build", "elysia-bun")]
 
 
 def run_control_plane(*arguments: str) -> subprocess.CompletedProcess[str]:

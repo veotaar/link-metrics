@@ -968,7 +968,8 @@ def run_scenario_trial(
             template = inspect_template(root, contender_id)
         except DatasetError as error:
             raise TrialError(
-                f"{error}; run `link-metrics dataset build {contender_id}` first"
+                f"{error}; run `link-metrics dataset build {contender_id} "
+                f"--root {root}` first"
             ) from error
 
         base_url = _contender_base_url(root, contender_id)
@@ -984,6 +985,8 @@ def run_scenario_trial(
                 )
             _apply_official_resource_profile(root, contender_id)
         if official or verify_conformance:
+            reset_from_template(root, contender_id, template["templateChecksum"])
+            inspect_contender(root, contender_id)
             conformance = run_conformance_checks(root, contender_id, base_url)
         expected_warm = max(rate * warm_seconds * 2, 100)
         warm_workload = sample_workload(root, repetition, int(expected_warm))

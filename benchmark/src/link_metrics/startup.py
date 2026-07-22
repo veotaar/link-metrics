@@ -324,7 +324,7 @@ def run_cold_startup(
         raise StartupError(
             "PostgreSQL and the Benchmark Dataset must already be ready; run "
             f"`link-metrics contenders start {contender_id}` and "
-            f"`link-metrics dataset build {contender_id}` first"
+            f"`link-metrics dataset build {contender_id} --root {root}` first"
         )
     if not bool(_container_document(names.database)["State"]["Running"]):
         _docker("start", names.database)
@@ -333,7 +333,8 @@ def run_cold_startup(
         template = inspect_template(root, contender_id)
     except DatasetError as error:
         raise StartupError(
-            f"{error}; run `link-metrics dataset build {contender_id}` first"
+            f"{error}; run `link-metrics dataset build {contender_id} "
+            f"--root {root}` first"
         ) from error
 
     remove_contender_container(root, contender_id)

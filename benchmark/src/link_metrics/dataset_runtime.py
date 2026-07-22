@@ -498,17 +498,23 @@ ALTER DATABASE {template} WITH IS_TEMPLATE true ALLOW_CONNECTIONS false;
     }
 
 
+def build_template_runtime(root: Path, contender_id: str) -> dict[str, Any]:
+    """Build or reuse a template after bringing its PostgreSQL runtime online."""
+    root = root.resolve()
+    names = _resource_names(root, contender_id)
+    if _container_exists(names.database):
+        ensure_database_running(root, contender_id)
+    else:
+        start_contender(root, contender_id)
+    return build_template(root, contender_id)
+
+
 def prepare_template_runtime(root: Path, contender_id: str) -> dict[str, Any]:
     """Prepare or resume one persistent Dataset template, then pause its containers."""
     root = root.resolve()
-    names = _resource_names(root, contender_id)
     try:
-        if _container_exists(names.database):
-            ensure_database_running(root, contender_id)
-        else:
-            start_contender(root, contender_id)
         try:
-            return build_template(root, contender_id)
+            return build_template_runtime(root, contender_id)
         except DatasetError as error:
             if "Trial database must be empty" not in str(error):
                 raise

@@ -50,6 +50,20 @@ def test_scenario_script_uses_open_loop_http11_keepalive() -> None:
     assert script.count("unexpectedResponses.add(1)") == 1
 
 
+def test_scenario_script_keeps_large_workload_streams_shared_between_vus() -> None:
+    script = (REPOSITORY_ROOT / SCENARIO_SCRIPT).read_text(encoding="utf-8")
+
+    assert 'new SharedArray("workload"' not in script
+    for stream in (
+        "validationSamples",
+        "userSamples",
+        "uniformAccessSamples",
+        "viralAccessSamples",
+    ):
+        assert f"const {stream} = new SharedArray(" in script
+        assert f'"{stream}"' in script
+
+
 def test_scenario_script_archives_under_pinned_k6(tmp_path: Path) -> None:
     version = subprocess.run(
         ["docker", "run", "--rm", K6_IMAGE, "version"],

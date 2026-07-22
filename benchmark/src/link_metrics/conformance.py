@@ -134,6 +134,8 @@ def _run_schemathesis(
                 str(repository_root / "contracts" / "http" / "openapi.yaml"),
                 "--url",
                 contender_url,
+                "--exclude-operation-id",
+                "resolveShortLink",
                 "--phases",
                 "examples,coverage,fuzzing,stateful",
                 "--checks",

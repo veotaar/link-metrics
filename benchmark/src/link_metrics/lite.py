@@ -145,6 +145,8 @@ def run_lite_exploration(
     scenarios: Sequence[str] = DEFAULT_LITE_SCENARIOS,
     max_hours: float = 2,
     trial_runner: Callable[..., dict[str, Any]] | None = None,
+    template_preparer: Callable[[Path, str], object] | None = None,
+    progress: Callable[[str], None] | None = None,
     budget: ExecutionBudget | None = None,
     work_directory: Path | None = None,
 ) -> dict[str, Any]:
@@ -167,8 +169,13 @@ def run_lite_exploration(
         from link_metrics.trial import run_scenario_trial
 
         trial_runner = run_scenario_trial
+    if template_preparer is None:
+        from link_metrics.dataset_runtime import prepare_template_runtime
+
+        template_preparer = prepare_template_runtime
     if budget is None:
         budget = ExecutionBudget.for_hours(max_hours)
+    report_progress = progress or (lambda message: None)
 
     if work_directory is None:
         with tempfile.TemporaryDirectory(prefix="link-metrics-lite-") as temporary:
@@ -178,6 +185,8 @@ def run_lite_exploration(
                 scenarios=scenarios,
                 max_hours=max_hours,
                 trial_runner=trial_runner,
+                template_preparer=template_preparer,
+                progress=report_progress,
                 budget=budget,
                 work_directory=Path(temporary),
             )
@@ -185,13 +194,25 @@ def run_lite_exploration(
     work_directory.mkdir(parents=True, exist_ok=True)
     results: list[dict[str, Any]] = []
     conformed: set[str] = set()
+    prepared: set[str] = set()
     sequence = 0
 
     def run_trial(contender: str, scenario: str, mode: str, rate: float) -> dict[str, Any]:
         nonlocal sequence
         if not budget.can_start():
             raise _LiteBudgetExhausted
+        if contender not in prepared:
+            report_progress(f"Preparing {contender} dataset template")
+            template_preparer(root.resolve(), contender)
+            prepared.add(contender)
+            report_progress(f"Prepared {contender} dataset template")
+            if not budget.can_start():
+                raise _LiteBudgetExhausted
         sequence += 1
+        phase = "calibration" if mode == "lite-calibration" else "confirmation"
+        rate_label = f"{rate:,.2f}".rstrip("0").rstrip(".")
+        trial_label = f"{contender} / {scenario}: {phase} at {rate_label} req/s"
+        report_progress(f"Running {trial_label}")
         bundle = trial_runner(
             root.resolve(),
             contender,
@@ -203,6 +224,7 @@ def run_lite_exploration(
             pause_database_after=True,
             verify_conformance=contender not in conformed,
         )
+        report_progress(f"Finished {trial_label}")
         conformed.add(contender)
         budget.record_completed()
         return bundle

@@ -16,7 +16,11 @@ from link_metrics.dataset import (
     sample_workload,
     write_reference_tokens,
 )
-from link_metrics.dataset_runtime import build_template, inspect_template, reset_from_template
+from link_metrics.dataset_runtime import (
+    build_template_runtime,
+    inspect_template,
+    reset_from_template,
+)
 from link_metrics.environment import (
     LOCAL_RESOURCE_PROFILE,
     assess_host_preflight,
@@ -248,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.group == "dataset" and args.command == "sample":
             output = sample_workload(args.root.resolve(), args.repetition, args.count)
         elif args.group == "dataset" and args.command == "build":
-            output = build_template(args.root.resolve(), args.contender_id)
+            output = build_template_runtime(args.root.resolve(), args.contender_id)
         elif args.group == "dataset" and args.command == "inspect":
             output = inspect_template(args.root.resolve(), args.contender_id)
         elif args.group == "dataset" and args.command == "reset":
@@ -272,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
                 contenders,
                 scenarios=args.scenario or DEFAULT_LITE_SCENARIOS,
                 max_hours=args.max_hours,
+                progress=lambda message: print(message, file=sys.stderr, flush=True),
             )
         elif args.group == "report":
             output = write_reports(

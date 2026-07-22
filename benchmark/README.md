@@ -97,6 +97,11 @@ reporting or verification. `--scenario` is repeatable. The two-hour default budg
 the maximum; expiration prevents the next atomic Trial from starting, while an active Trial
 is allowed to finish and clean up.
 
+Before a Contender's first lite Trial, the control plane prepares its immutable PostgreSQL
+template automatically. Existing templates are reused, and new contender-local templates
+reuse the persistent User seed cache described above instead of recomputing the expensive
+Argon2id corpus.
+
 ```sh
 uv run link-metrics lite run \
   --scenario short-link-creation \

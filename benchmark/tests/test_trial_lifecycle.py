@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from link_metrics.dataset import sample_workload
+from link_metrics import trial
+from link_metrics.dataset import DatasetError, sample_workload
 from link_metrics.trial import (
     CONTENDER_CONSTRAINTS,
     SMOKE_MEASURE_SECONDS,
@@ -19,6 +20,7 @@ from link_metrics.trial import (
     SCENARIO_CONFIGURATIONS,
     TRIAL_MEASURE_SECONDS,
     TRIAL_WARM_SECONDS,
+    TrialError,
     build_validation_flags,
     parse_k6_summary,
 )
@@ -57,6 +59,101 @@ def test_smoke_and_trial_durations_are_protocol_constants() -> None:
     assert SMOKE_OFFERED_RATE == 2
     assert TRIAL_WARM_SECONDS == 30
     assert TRIAL_MEASURE_SECONDS == 60
+
+
+def test_missing_template_suggestion_preserves_the_repository_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(trial, "_find_manifest", lambda root, contender_id: {"id": contender_id})
+    monkeypatch.setattr(
+        trial,
+        "describe_dataset",
+        lambda root: {"repetitionSeeds": [123], "version": "1.2.0"},
+    )
+    monkeypatch.setattr(trial, "_ensure_fresh_contender", lambda root, contender_id: False)
+    monkeypatch.setattr(
+        trial,
+        "inspect_template",
+        lambda root, contender_id: (_ for _ in ()).throw(
+            DatasetError("template database has not been built")
+        ),
+    )
+    monkeypatch.setattr(trial, "_remove_k6", lambda root, contender_id: None)
+    monkeypatch.setattr(trial, "remove_contender_container", lambda root, contender_id: None)
+
+    with pytest.raises(TrialError) as caught:
+        trial.run_scenario_trial(
+            REPOSITORY_ROOT,
+            "elysia-bun",
+            scenario="registration",
+            output=tmp_path / "trial.json",
+            mode="smoke",
+        )
+
+    assert (
+        f"link-metrics dataset build elysia-bun --root {REPOSITORY_ROOT}"
+        in str(caught.value)
+    )
+
+
+def test_trial_restores_the_dataset_before_conformance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(trial, "_find_manifest", lambda root, contender_id: {"id": contender_id})
+    monkeypatch.setattr(
+        trial,
+        "describe_dataset",
+        lambda root: {"repetitionSeeds": [123], "version": "1.2.0"},
+    )
+    monkeypatch.setattr(trial, "_ensure_fresh_contender", lambda root, contender_id: False)
+    monkeypatch.setattr(
+        trial,
+        "inspect_template",
+        lambda root, contender_id: {"templateChecksum": "sha256:template"},
+    )
+    monkeypatch.setattr(trial, "_contender_base_url", lambda root, contender_id: "http://contender")
+    monkeypatch.setattr(
+        trial,
+        "reset_from_template",
+        lambda root, contender_id, checksum: events.append("reset")
+        or {"templateChecksum": checksum},
+    )
+    monkeypatch.setattr(trial, "inspect_contender", lambda root, contender_id: {})
+    monkeypatch.setattr(
+        trial,
+        "capture_host_observation",
+        lambda profile: {"captured": True},
+    )
+    monkeypatch.setattr(
+        trial,
+        "assess_host_preflight",
+        lambda profile, observation: {"valid": True, "reasons": [], "observation": observation},
+    )
+    monkeypatch.setattr(trial, "_apply_official_resource_profile", lambda root, contender_id: None)
+
+    def stop_after_conformance(root: Path, contender_id: str, base_url: str) -> None:
+        events.append("conformance")
+        raise RuntimeError("stop after conformance")
+
+    monkeypatch.setattr(trial, "run_conformance_checks", stop_after_conformance)
+    monkeypatch.setattr(trial, "_remove_k6", lambda root, contender_id: None)
+    monkeypatch.setattr(trial, "remove_contender_container", lambda root, contender_id: None)
+
+    with pytest.raises(RuntimeError, match="stop after conformance"):
+        trial.run_scenario_trial(
+            REPOSITORY_ROOT,
+            "elysia-bun",
+            scenario="registration",
+            output=tmp_path / "trial.json",
+            mode="lite-calibration",
+            offered_rate=1,
+            verify_conformance=True,
+        )
+
+    assert events == ["reset", "conformance"]
 
 
 def test_contender_constraints_record_pool_timeouts_and_no_access_logging() -> None:

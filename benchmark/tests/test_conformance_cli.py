@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from link_metrics import conformance
 from link_metrics.conformance import (
     ConformanceError,
     _require_completed_stateful_phase,
@@ -75,6 +76,30 @@ def test_nonconforming_service_cannot_produce_eligibility() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_schemathesis_excludes_the_deterministically_checked_redirect_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(conformance, "_schemathesis_token", lambda contender_url: "token")
+    monkeypatch.setattr(
+        conformance,
+        "_run_gate_command",
+        lambda arguments, **kwargs: commands.append(arguments)
+        or subprocess.CompletedProcess(arguments, 0, "", ""),
+    )
+    monkeypatch.setattr(conformance, "_require_completed_stateful_phase", lambda path: None)
+
+    conformance._run_schemathesis(
+        REPOSITORY_ROOT,
+        REPOSITORY_ROOT / "benchmark",
+        "http://contender",
+    )
+
+    command = commands[0]
+    exclusion = command.index("--exclude-operation-id")
+    assert command[exclusion + 1] == "resolveShortLink"
 
 
 def test_machine_report_requires_a_completed_stateful_phase(tmp_path: Path) -> None:

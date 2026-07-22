@@ -20,20 +20,30 @@ const maxVUs = Number(__ENV.MAX_VUS || "256");
 const baseUrl = (__ENV.BASE_URL || "http://127.0.0.1:3000").replace(/\/$/, "");
 const scenario = __ENV.SCENARIO || "registration";
 
-const workload = new SharedArray("workload", () => {
+function loadWorkloadSamples() {
   if (__ENV.WORKLOAD_PATH) {
-    return [JSON.parse(open(__ENV.WORKLOAD_PATH))];
+    return JSON.parse(open(__ENV.WORKLOAD_PATH)).samples;
   }
-  return [
-    {
-      samples: {
-        access: { uniform: ["00000001"], viral: ["00000001"] },
-        users: [0],
-        validation: [true],
-      },
-    },
-  ];
-})[0];
+  return {
+    access: { uniform: ["00000001"], viral: ["00000001"] },
+    users: [0],
+    validation: [true],
+  };
+}
+
+const validationSamples = new SharedArray(
+  "validationSamples",
+  () => loadWorkloadSamples().validation,
+);
+const userSamples = new SharedArray("userSamples", () => loadWorkloadSamples().users);
+const uniformAccessSamples = new SharedArray(
+  "uniformAccessSamples",
+  () => loadWorkloadSamples().access.uniform,
+);
+const viralAccessSamples = new SharedArray(
+  "viralAccessSamples",
+  () => loadWorkloadSamples().access.viral,
+);
 
 const tokenCorpus = new SharedArray("referenceTokens", () => {
   if (__ENV.TOKENS_PATH) {
@@ -70,8 +80,9 @@ function benchmarkEmail(userIndex) {
 }
 
 function shouldValidateBody(iteration) {
-  const flags = workload.samples.validation;
-  return flags.length > 0 ? Boolean(flags[iteration % flags.length]) : iteration % 100 === 0;
+  return validationSamples.length > 0
+    ? Boolean(validationSamples[iteration % validationSamples.length])
+    : iteration % 100 === 0;
 }
 
 function isJsonContentType(value) {
@@ -182,8 +193,7 @@ function registration(iteration) {
 }
 
 function login(iteration) {
-  const users = workload.samples.users;
-  const email = benchmarkEmail(users[iteration % users.length]);
+  const email = benchmarkEmail(userSamples[iteration % userSamples.length]);
   const response = http.post(`${baseUrl}/api/auth/login`, JSON.stringify({ email, password }), {
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     timeout: "5s",
@@ -252,7 +262,7 @@ function shortLinkCreation(iteration) {
 }
 
 function resolution(iteration, accessPattern) {
-  const shortCodes = workload.samples.access[accessPattern];
+  const shortCodes = accessPattern === "uniform" ? uniformAccessSamples : viralAccessSamples;
   const shortCode = shortCodes[iteration % shortCodes.length];
   const destination = expectedDestination(shortCode);
   const response = http.get(`${baseUrl}/${shortCode}`, {
