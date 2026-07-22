@@ -66,6 +66,12 @@ Replace `registration` with `login`, `short-link-creation`, `statistics`,
 `uniform-resolution`, or `viral-resolution` to calibrate and report that success-path
 Scenario independently.
 
+For the complete four-Contender Result Series, use the resumable daily workflow documented
+in [`benchmark/README.md`](benchmark/README.md#run-the-complete-local-series-over-multiple-days).
+It accepts a wall-clock budget, preserves completed atomic evidence across sessions, and
+generates a checksum-verifiable report only after all Scenarios and cold-start repetitions
+finish.
+
 The control plane treats Express as opaque: it builds from `contender.yaml`, supplies the
 restricted PostgreSQL connection, and observes only the standard `/health` operation.
 
@@ -76,7 +82,7 @@ The discovery command validates every `backends/<id>/contender.yaml` against `be
 The initial comparability identifiers are independent:
 
 - API Contract: `1.0.1` in `contracts/http/openapi.yaml`
-- benchmark protocol: `1.0.0` in `benchmark/protocol/VERSION`
+- benchmark protocol: `4.0.0` in `benchmark/protocol/VERSION`
 - Benchmark Dataset: `1.2.0` in `benchmark/dataset/VERSION`
 
 A **Result Series** may compare results only when its API Contract version, protocol version, Benchmark Dataset version, and environment fingerprint all match exactly.

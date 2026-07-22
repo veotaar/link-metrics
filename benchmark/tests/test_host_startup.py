@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 
@@ -12,7 +14,12 @@ from link_metrics.environment import (
     summarize_host_execution,
 )
 from link_metrics.reporting import write_reports
-from link_metrics.startup import summarize_cold_startup, write_cold_start_bundle
+from link_metrics.progress import ExecutionBudget
+from link_metrics.startup import (
+    resume_cold_start_repetitions,
+    summarize_cold_startup,
+    write_cold_start_bundle,
+)
 from link_metrics.startup import docker_started_at_ns
 
 
@@ -26,9 +33,10 @@ def host_observation() -> dict[str, object]:
         "threadSiblings": {str(cpu): [cpu, cpu + 8] for cpu in range(8)},
         "frequenciesKHz": {str(cpu): 4_200_000 for cpu in range(8)},
         "temperatureMilliCelsius": 55_000,
+        "temperatureObserved": True,
         "thermalThrottlingActive": False,
-        "thermalThrottlingObserved": True,
-        "thermalThrottleCounts": {str(cpu): 0 for cpu in range(8)},
+        "thermalThrottlingObserved": False,
+        "thermalThrottleCounts": {},
     }
 
 
@@ -89,6 +97,10 @@ def test_preflight_rejects_smt_siblings_and_an_unstable_host() -> None:
 def test_trial_host_evidence_invalidates_frequency_temperature_and_throttling() -> None:
     first = host_observation()
     second = host_observation()
+    first["thermalThrottlingObserved"] = True
+    first["thermalThrottleCounts"] = {str(cpu): 0 for cpu in range(8)}
+    second["thermalThrottlingObserved"] = True
+    second["thermalThrottleCounts"] = {str(cpu): 0 for cpu in range(8)}
     second["frequenciesKHz"] = {str(cpu): 3_800_000 for cpu in range(8)}
     second["temperatureMilliCelsius"] = 82_000
     second["thermalThrottleCounts"] = {**second["thermalThrottleCounts"], "3": 1}
@@ -108,19 +120,47 @@ def test_trial_host_evidence_invalidates_frequency_temperature_and_throttling() 
     assert evidence["thermalThrottleIncrements"] == {"3": 1}
 
 
-def test_missing_thermal_signal_fails_preflight_and_execution_evidence() -> None:
+def test_amd_temperature_and_frequency_are_valid_without_intel_throttle_counters() -> None:
     observation = host_observation()
-    observation["thermalThrottlingObserved"] = False
-    observation["thermalThrottleCounts"] = {}
+
+    preflight = assess_host_preflight(LOCAL_RESOURCE_PROFILE, observation)
+    execution = summarize_host_execution(LOCAL_RESOURCE_PROFILE, [observation])
+
+    assert preflight["valid"] is True
+    assert preflight["checks"]["temperatureSignal"] is True
+    assert execution["observed"] is True
+    assert execution["valid"] is True
+    assert execution["thermalThrottleCountersObserved"] is False
+
+
+def test_missing_cpu_temperature_fails_preflight_and_execution_evidence() -> None:
+    observation = host_observation()
+    observation["temperatureObserved"] = False
+    observation["temperatureMilliCelsius"] = None
 
     preflight = assess_host_preflight(LOCAL_RESOURCE_PROFILE, observation)
     execution = summarize_host_execution(LOCAL_RESOURCE_PROFILE, [observation])
 
     assert preflight["valid"] is False
-    assert "thermal_throttling_observation_missing" in preflight["reasons"]
+    assert "cpu_temperature_observation_missing" in preflight["reasons"]
     assert execution["observed"] is False
     assert execution["valid"] is False
     assert "host_execution_evidence_missing" in execution["reasons"]
+
+
+def test_host_preflight_command_reports_current_machine_without_mutating_it() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "link_metrics", "host", "preflight"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode in {0, 2}
+    assert payload["profile"] == "local-7800x3d"
+    assert payload["valid"] is (result.returncode == 0)
+    assert "observation" in payload
 
 
 def test_docker_started_at_uses_the_process_timestamp_not_client_invocation() -> None:
@@ -255,6 +295,55 @@ def test_official_cold_start_bundle_requires_full_provenance(tmp_path: Path) -> 
         assert "provenance" in str(error)
     else:
         raise AssertionError("expected incomplete official evidence to be rejected")
+
+
+def test_cold_start_repetitions_resume_without_remeasuring_completed_evidence(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "express-node.json"
+    measured: list[int] = []
+
+    def measure(repetition: int) -> dict[str, object]:
+        assert repetition not in measured
+        measured.append(repetition)
+        return {
+            "sample": {
+                "repetition": repetition,
+                "readinessMs": float(repetition),
+                "firstRequestMs": 5.0,
+                "readinessStatus": 204,
+                "firstRequestStatus": 201,
+                "templateChecksum": "sha256:template",
+            },
+            "hostObservations": [host_observation(), host_observation()],
+        }
+
+    paused = resume_cold_start_repetitions(
+        output,
+        contender_id="express-node",
+        template_checksum="sha256:template",
+        measure=measure,
+        budget=ExecutionBudget(maximum_units=3),
+    )
+
+    assert paused["status"] == "paused"
+    assert paused["completedRepetitions"] == 3
+    assert measured == [1, 2, 3]
+
+    completed = resume_cold_start_repetitions(
+        output,
+        contender_id="express-node",
+        template_checksum="sha256:template",
+        measure=measure,
+        budget=ExecutionBudget(),
+    )
+
+    assert completed["status"] == "complete"
+    assert completed["completedRepetitions"] == 20
+    assert measured == list(range(1, 21))
+    assert [
+        item["sample"]["repetition"] for item in completed["repetitions"]
+    ] == list(range(1, 21))
 
 
 def test_reports_keep_cold_start_separate_from_warm_capacity(tmp_path: Path) -> None:

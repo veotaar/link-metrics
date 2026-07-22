@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +13,7 @@ from typing import Any
 import pytest
 
 from link_metrics.reporting import write_reports
+from link_metrics.progress import ExecutionBudget
 from link_metrics.results import (
     ResultError,
     calibrate_boundary,
@@ -27,6 +30,14 @@ SEEDS = [
     16_145_191_919_997_344_020,
     12_322_208_812_885_659_100,
 ]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+GIT_COMMIT = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    cwd=REPOSITORY_ROOT,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
 
 
 def trial_bundle(
@@ -46,8 +57,9 @@ def trial_bundle(
         "schemaVersion": 1,
         "official": True,
         "mode": "trial",
+        "gitCommit": GIT_COMMIT,
         "apiContractVersion": "1.0.1",
-        "protocolVersion": "1.0.0",
+        "protocolVersion": "4.0.0",
         "datasetVersion": "1.2.0",
         "repetitionSeeds": SEEDS,
         "scenario": scenario,
@@ -55,7 +67,15 @@ def trial_bundle(
         "workloadSeed": SEEDS[repetition - 1],
         "contender": {"id": contender},
         "environment": {
-            "fingerprint": {"profileVersion": environment},
+            "fingerprint": {
+                "profileVersion": environment,
+                "hostname": platform.node(),
+                "kernel": platform.release(),
+                "machine": platform.machine(),
+                "python": platform.python_version(),
+                "cpus": os.cpu_count(),
+                "memoryBytes": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"),
+            },
             "execution": {
                 "observed": True,
                 "valid": True,
@@ -388,8 +408,10 @@ def test_capacity_sweep_records_calibration_and_five_trials_at_every_target(
         offered_rate: int,
         scenario: str,
         reference_tokens: object | None = None,
+        pause_database_after: bool = False,
     ) -> dict[str, Any]:
         del root
+        assert pause_database_after is True
         modes.append(mode)
         calls.append((contender_id, repetition, offered_rate))
         reference_corpora.append(reference_tokens)
@@ -401,6 +423,8 @@ def test_capacity_sweep_records_calibration_and_five_trials_at_every_target(
             achieved_iterations=offered_rate * 60,
             p99_ms=200 if offered_rate <= 100 else 251,
         )
+        bundle["official"] = mode == "trial"
+        bundle["mode"] = mode
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(bundle), encoding="utf-8")
         return bundle
@@ -457,6 +481,129 @@ def test_capacity_sweep_records_calibration_and_five_trials_at_every_target(
         official_corpora[index] is official_corpora[index + 1]
         for index in range(0, len(official_corpora), 2)
     )
+
+
+def test_capacity_sweep_resumes_from_immutable_trials_after_a_bounded_session(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "registration.json"
+    calls: list[Path] = []
+
+    def run_trial(
+        root: Path,
+        contender_id: str,
+        *,
+        output: Path,
+        mode: str,
+        repetition: int,
+        offered_rate: float,
+        scenario: str,
+        reference_tokens: object | None = None,
+        pause_database_after: bool = False,
+    ) -> dict[str, Any]:
+        del root, reference_tokens
+        assert pause_database_after is True
+        assert output not in calls
+        calls.append(output)
+        bundle = trial_bundle(
+            repetition,
+            scenario=scenario,
+            contender=contender_id,
+            offered_rate=offered_rate,
+            achieved_iterations=round(offered_rate * 60),
+            p99_ms=200 if offered_rate <= 100 else 1_001,
+        )
+        bundle["official"] = mode == "trial"
+        bundle["mode"] = mode
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(bundle), encoding="utf-8")
+        return bundle
+
+    paused = run_capacity_sweep(
+        Path(__file__).resolve().parents[2],
+        ["express-node"],
+        scenario="registration",
+        output=output,
+        trial_runner=run_trial,
+        budget=ExecutionBudget(maximum_units=3),
+    )
+
+    assert paused["kind"] == "capacity-progress"
+    assert paused["status"] == "paused"
+    assert paused["completedTrials"] == 3
+    first_session_paths = tuple(calls)
+    assert not output.exists()
+
+    completed = run_capacity_sweep(
+        Path(__file__).resolve().parents[2],
+        ["express-node"],
+        scenario="registration",
+        output=output,
+        trial_runner=run_trial,
+        budget=ExecutionBudget(),
+    )
+
+    assert completed["kind"] == "result-series"
+    assert output.is_file()
+    assert all(path not in calls[len(first_session_paths) :] for path in first_session_paths)
+    assert len(completed["measurements"]) == 30
+
+
+def test_capacity_resume_rejects_evidence_from_another_repository_commit(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "registration.json"
+
+    def run_trial(
+        root: Path,
+        contender_id: str,
+        *,
+        output: Path,
+        mode: str,
+        repetition: int,
+        offered_rate: float,
+        scenario: str,
+        reference_tokens: object | None = None,
+        pause_database_after: bool = False,
+    ) -> dict[str, Any]:
+        del root, reference_tokens
+        assert pause_database_after is True
+        bundle = trial_bundle(
+            repetition,
+            scenario=scenario,
+            contender=contender_id,
+            offered_rate=offered_rate,
+            achieved_iterations=round(offered_rate * 60),
+            p99_ms=200,
+        )
+        bundle["official"] = mode == "trial"
+        bundle["mode"] = mode
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(bundle), encoding="utf-8")
+        return bundle
+
+    run_capacity_sweep(
+        REPOSITORY_ROOT,
+        ["express-node"],
+        scenario="registration",
+        output=output,
+        trial_runner=run_trial,
+        budget=ExecutionBudget(maximum_units=1),
+    )
+    first_trial = next((tmp_path / "registration.trials").glob("*.json"))
+    evidence = json.loads(first_trial.read_text(encoding="utf-8"))
+    evidence["gitCommit"] = "different-commit"
+    first_trial.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ResultError, match="does not match its schedule"):
+        run_capacity_sweep(
+            REPOSITORY_ROOT,
+            ["express-node"],
+            scenario="registration",
+            output=output,
+            trial_runner=run_trial,
+            budget=ExecutionBudget(),
+        )
 
 
 def test_capacity_sweep_refuses_to_overwrite_raw_evidence(tmp_path: Path) -> None:

@@ -17,6 +17,12 @@ from link_metrics.dataset import (
     write_reference_tokens,
 )
 from link_metrics.dataset_runtime import build_template, inspect_template, reset_from_template
+from link_metrics.environment import (
+    LOCAL_RESOURCE_PROFILE,
+    assess_host_preflight,
+    capture_host_observation,
+)
+from link_metrics.progress import ExecutionBudget
 from link_metrics.reporting import write_reports
 from link_metrics.results import ResultError, run_capacity_sweep
 from link_metrics.runtime import (
@@ -26,6 +32,7 @@ from link_metrics.runtime import (
     start_contender,
     stop_contender,
 )
+from link_metrics.series import SeriesError, run_result_series, verify_result_series
 from link_metrics.startup import StartupError, run_cold_startup
 from link_metrics.trial import SCENARIOS, TrialError, run_scenario_trial
 
@@ -53,6 +60,13 @@ def _parser() -> argparse.ArgumentParser:
     lint = contract_commands.add_parser("lint", help="lint the OpenAPI authority")
     default_document = Path(__file__).resolve().parents[3] / "contracts" / "http" / "openapi.yaml"
     lint.add_argument("--document", type=Path, default=default_document)
+
+    host = groups.add_parser("host", help="inspect the benchmark host")
+    host_commands = host.add_subparsers(dest="command", required=True)
+    host_commands.add_parser(
+        "preflight",
+        help="report whether the host satisfies the official resource profile",
+    )
 
     dataset = groups.add_parser("dataset", help="operate on the Benchmark Dataset")
     dataset_commands = dataset.add_subparsers(dest="command", required=True)
@@ -129,6 +143,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     generate.add_argument("raw_bundles", nargs="+", type=Path)
     generate.add_argument("--output-dir", type=Path, required=True)
+
+    series = groups.add_parser("series", help="operate the complete local Result Series")
+    series_commands = series.add_subparsers(dest="command", required=True)
+    series_run = series_commands.add_parser(
+        "run",
+        help="advance the complete cohort within a daily wall-clock budget",
+    )
+    series_run.add_argument("--time-budget-hours", type=float, required=True)
+    series_run.add_argument("--output-dir", type=Path, required=True)
+    series_run.add_argument("--root", type=Path, default=Path.cwd())
+    series_verify = series_commands.add_parser(
+        "verify",
+        help="verify raw and generated Result Series checksums",
+    )
+    series_verify.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
@@ -136,7 +165,30 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
 
     try:
-        if args.group == "contenders" and args.command == "discover":
+        if args.group == "host":
+            output = assess_host_preflight(
+                LOCAL_RESOURCE_PROFILE,
+                capture_host_observation(LOCAL_RESOURCE_PROFILE),
+            )
+            print(json.dumps(output, indent=2, sort_keys=True))
+            return 0 if output["valid"] else 2
+        if args.group == "series" and args.command == "verify":
+            output = verify_result_series(args.output_dir.resolve())
+        elif args.group == "series":
+            contenders = tuple(
+                item["id"] for item in discover_contenders(args.root.resolve())
+            )
+            try:
+                budget = ExecutionBudget.for_hours(args.time_budget_hours)
+            except ValueError as error:
+                raise SeriesError(str(error)) from error
+            output = run_result_series(
+                args.root.resolve(),
+                output_dir=args.output_dir.resolve(),
+                contenders=contenders,
+                budget=budget,
+            )
+        elif args.group == "contenders" and args.command == "discover":
             output = discover_contenders(args.root.resolve())
         elif args.group == "contenders" and args.command == "start":
             output = start_contender(args.root.resolve(), args.contender_id)
@@ -213,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         ContractLintError,
         DatasetError,
         ResultError,
+        SeriesError,
         StartupError,
         TrialError,
     ) as error:

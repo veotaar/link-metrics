@@ -5,7 +5,7 @@
 `scenarios.yaml` is the scored operation allowlist. The readiness operation is
 deliberately absent: `/health` gates a Trial but never contributes a performance sample.
 
-Protocol 3.0 runs each accepted success-path operation as an isolated open-loop Scenario:
+Protocol 4.0 runs each accepted success-path operation as an isolated open-loop Scenario:
 registration, login, Short Link creation, statistics, uniform resolution, and viral
 resolution. Login selects seeded credentials. Protected Scenarios cycle the same seeded
 10,000-User reference-token corpus, with statistics alternating evenly between owned
@@ -25,10 +25,20 @@ physical cores 0–3 and 8 GiB, PostgreSQL receives physical cores 4–5 and 8 G
 receives physical cores 6–7 and 4 GiB. Equal memory and memory-plus-swap limits prohibit
 container swap. Preflight verifies the Ryzen 7 7800X3D topology, distinct SMT sibling
 groups, a quiescent host, the performance governor, disabled boost, 3.99–4.41 GHz
-frequency, a maximum 80 °C CPU temperature, no active thermal alarm, and throttle counters
-for every assigned physical core. Measurements that leave the frequency or thermal
-envelope, increment a throttle counter, or lack host
-or mandatory resource telemetry remain in raw evidence but are invalid.
+frequency, and a maximum 80 °C CPU temperature. The Ryzen profile uses the kernel's CPU
+hwmon temperature signal together with the fixed frequency envelope to detect thermal
+instability. Hardware throttle counters and critical-temperature alarms are retained when
+the kernel exposes them, but are optional because AMD `k10temp` does not provide Intel's
+per-core `thermal_throttle` files. Measurements that leave the frequency or temperature
+envelope, report a thermal alarm or counter increment, or lack host or mandatory resource
+telemetry remain in raw evidence but are invalid.
+
+Complete Result Series execution is resumable only between atomic Trials and cold-start
+repetitions. Each completed unit is written create-only before the next begins. A daily
+wall-clock budget prevents a new unit from starting after its deadline; the active unit may
+finish after the deadline. Resumption validates and reuses existing evidence against its
+scheduled Contender, Scenario, mode, repetition, offered rate, and Dataset template rather
+than silently rerunning it.
 
 Every measured Trial records Contender and PostgreSQL cgroup-v2 CPU-time deltas,
 sampled average and peak resident memory (`memory.stat` anonymous, mapped-file, and shared

@@ -113,6 +113,54 @@ uv run link-metrics report generate /tmp/registration-series.json \
   --output-dir /tmp/registration-report
 ```
 
+## Run the complete local series over multiple days
+
+The complete first cohort has a resumable, time-bounded command. It discovers every local
+Contender, prepares and preserves each immutable Dataset template, advances all six
+Scenarios, runs all four cold-start series, generates the comparison, and writes a checksum
+manifest. Only the PostgreSQL container for the active atomic unit runs; prepared containers
+remain stopped between units and sessions.
+
+Configure the host yourself before each session, then confirm the read-only preflight:
+
+```sh
+sudo cpupower frequency-set --governor performance
+echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost
+uv run link-metrics host preflight
+```
+
+Advance the series for up to four hours. The command checks the budget before starting each
+Trial or cold-start repetition, so the current atomic unit may finish after the deadline.
+Run the exact same command on later days; completed create-only evidence is validated and
+reused rather than rerun. `Ctrl-C` is also safe between sessions: an interrupted unit without
+a completed evidence file is the only unit attempted again.
+
+```sh
+uv run link-metrics series run \
+  --time-budget-hours 4 \
+  --output-dir ../results/local-7800x3d \
+  --root ..
+```
+
+Progress JSON names completed Scenarios and cold-start series. When `status` becomes
+`complete`, the raw bundles, generated report, and `manifest.json` are ready. Verify them at
+any time without running a benchmark:
+
+```sh
+uv run link-metrics series verify \
+  --output-dir ../results/local-7800x3d
+```
+
+Do not change code, the API Contract, protocol, Dataset, Contender manifests, or host profile
+while a series is in progress. Existing evidence that no longer matches its schedule or
+comparability key is rejected instead of silently discarded. After the final session, normal
+desktop CPU behavior can be restored with:
+
+```sh
+echo 1 | sudo tee /sys/devices/system/cpu/cpufreq/boost
+sudo cpupower frequency-set --governor powersave
+```
+
 End-to-end smoke coverage is opt-in: `LINK_METRICS_TEST_TRIAL=1 uv run pytest tests/test_trial_lifecycle.py`.
 
 The lockfile is committed. Change dependencies with `uv add` or `uv remove`, and verify installation with `uv sync --locked`. Pytest and Schemathesis are pinned together as the conformance toolchain.

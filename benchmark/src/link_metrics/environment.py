@@ -163,6 +163,7 @@ def capture_host_observation(
         "threadSiblings": siblings,
         "frequenciesKHz": frequencies,
         "temperatureMilliCelsius": temperature,
+        "temperatureObserved": temperature is not None,
         "thermalThrottlingActive": thermal_alarm,
         "thermalThrottlingObserved": len(throttle_counts) == len(cpus),
         "thermalThrottleCounts": throttle_counts,
@@ -217,11 +218,14 @@ def assess_host_preflight(
             <= tolerance["maximumFrequencyKHz"]
             for cpu in cpus
         ),
+        "temperatureSignal": observation.get("temperatureObserved") is True,
         "temperature": (
-            isinstance(temperature, int)
-            and temperature <= tolerance["maximumTemperatureMilliCelsius"]
+            observation.get("temperatureObserved") is not True
+            or (
+                isinstance(temperature, int)
+                and temperature <= tolerance["maximumTemperatureMilliCelsius"]
+            )
         ),
-        "thermalSignal": observation.get("thermalThrottlingObserved") is True,
         "noThermalThrottling": observation.get("thermalThrottlingActive") is False,
     }
     reason_by_check = {
@@ -232,8 +236,8 @@ def assess_host_preflight(
         "performanceGovernor": "performance_governor_required",
         "dynamicBoostDisabled": "dynamic_boost_enabled",
         "frequency": "cpu_frequency_out_of_tolerance",
+        "temperatureSignal": "cpu_temperature_observation_missing",
         "temperature": "cpu_temperature_out_of_tolerance",
-        "thermalSignal": "thermal_throttling_observation_missing",
         "noThermalThrottling": "thermal_throttling_active",
     }
     reasons = [reason_by_check[name] for name, passed in checks.items() if not passed]
@@ -262,9 +266,6 @@ def summarize_host_execution(
         bool(observations)
         and all(isinstance(value, int) for value in frequencies)
         and all(isinstance(value, int) for value in temperatures)
-        and all(
-            sample.get("thermalThrottlingObserved") is True for sample in observations
-        )
     )
     numeric_frequencies = [int(value) for value in frequencies if isinstance(value, int)]
     numeric_temperatures = [int(value) for value in temperatures if isinstance(value, int)]
@@ -277,6 +278,9 @@ def summarize_host_execution(
         and str(cpu) in last_counts
         and int(last_counts[str(cpu)]) > int(first_counts[str(cpu)])
     }
+    throttle_counters_observed = all(
+        sample.get("thermalThrottlingObserved") is True for sample in observations
+    )
     reasons: list[str] = []
     if not complete:
         reasons.append("host_execution_evidence_missing")
@@ -295,6 +299,7 @@ def summarize_host_execution(
         "sampleCount": len(observations),
         "valid": not reasons,
         "reasons": reasons,
+        "thermalThrottleCountersObserved": throttle_counters_observed,
         "frequencyKHz": {
             "average": (
                 sum(numeric_frequencies) / len(numeric_frequencies)

@@ -6,8 +6,11 @@ import hashlib
 import itertools
 import json
 import math
+import os
+import platform
 import random
 import statistics
+import subprocess
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -20,6 +23,7 @@ from link_metrics.dataset import (
     describe_dataset,
 )
 from link_metrics.evidence import write_immutable_json
+from link_metrics.progress import ExecutionBudget
 from link_metrics.scenarios import P99_BUDGETS_MS, PROTECTED_SCENARIOS
 
 
@@ -28,6 +32,89 @@ TARGET_PERCENTAGES = (25, 50, 75, 90, 100, 110)
 
 class ResultError(Exception):
     """Raw results cannot be calibrated, combined, qualified, or reported."""
+
+
+class _CapacityPaused(Exception):
+    """No new Trial may start within the current execution budget."""
+
+
+def _load_resumable_trial(
+    path: Path,
+    *,
+    contender: str,
+    scenario: str,
+    mode: str,
+    repetition: int,
+    offered_rate: float,
+    expected_provenance: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        bundle = json.loads(path.read_text(encoding="utf-8"))
+        matches = (
+            isinstance(bundle, dict)
+            and bundle.get("contender", {}).get("id") == contender
+            and bundle.get("scenario") == scenario
+            and bundle.get("mode") == mode
+            and int(bundle.get("repetition")) == repetition
+            and float(bundle.get("workload", {}).get("offeredRate")) == offered_rate
+            and bool(bundle.get("official")) is (mode == "trial")
+            and all(bundle.get(key) == value for key, value in expected_provenance.items())
+            and all(
+                bundle.get("environment", {}).get("fingerprint", {}).get(key) == value
+                for key, value in _current_host_identity().items()
+            )
+        )
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        matches = False
+        bundle = None
+    if not matches or not isinstance(bundle, dict):
+        raise ResultError(f"existing resumable Trial does not match its schedule: {path}")
+    return bundle
+
+
+def _repository_commit(root: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise ResultError("cannot determine the repository commit for resumption")
+    return result.stdout.strip()
+
+
+def _current_host_identity() -> dict[str, Any]:
+    return {
+        "hostname": platform.node(),
+        "kernel": platform.release(),
+        "machine": platform.machine(),
+        "python": platform.python_version(),
+        "cpus": os.cpu_count(),
+        "memoryBytes": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"),
+    }
+
+
+def _load_completed_series(
+    output: Path, contenders: Sequence[str], scenario: str
+) -> dict[str, Any]:
+    try:
+        document = json.loads(output.read_text(encoding="utf-8"))
+        measured_contenders = {
+            str(bundle["contender"]["id"]) for bundle in document["measurements"]
+        }
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        document = None
+        measured_contenders = set()
+    if (
+        not isinstance(document, dict)
+        or document.get("kind") != "result-series"
+        or document.get("scenario") != scenario
+        or measured_contenders != set(contenders)
+    ):
+        raise ResultError(f"result bundle already exists with incompatible evidence: {output}")
+    return document
 
 
 def _trial_sample(bundle: dict[str, Any]) -> dict[str, Any]:
@@ -173,10 +260,11 @@ def run_capacity_sweep(
     scenario: str,
     output: Path,
     trial_runner: Callable[..., dict[str, Any]] | None = None,
+    budget: ExecutionBudget | None = None,
 ) -> dict[str, Any]:
     """Calibrate Contenders, run the official schedule, and write raw evidence."""
     if output.exists():
-        raise ResultError(f"result bundle already exists: {output}")
+        return _load_completed_series(output, contenders, scenario)
     if scenario not in P99_BUDGETS_MS:
         raise ResultError(f"unknown Scenario: {scenario}")
     if len(set(contenders)) != len(contenders):
@@ -185,9 +273,18 @@ def run_capacity_sweep(
         from link_metrics.trial import run_scenario_trial
 
         trial_runner = run_scenario_trial
+    if budget is None:
+        budget = ExecutionBudget()
 
     root = root.resolve()
     manifest = describe_dataset(root)
+    expected_provenance = {
+        "gitCommit": _repository_commit(root),
+        "protocolVersion": (root / "benchmark" / "protocol" / "VERSION")
+        .read_text(encoding="utf-8")
+        .strip(),
+        "datasetVersion": str(manifest["version"]),
+    }
     repetition_seeds = [int(seed) for seed in manifest["repetitionSeeds"]]
     trial_directory = output.parent / f"{output.stem}.trials"
     reference_tokens: ReferenceTokenCorpus | None = None
@@ -210,27 +307,74 @@ def run_capacity_sweep(
     boundaries: dict[str, float] = {}
     all_trials: list[dict[str, Any]] = []
 
+    def pause_progress() -> dict[str, Any]:
+        return {
+            "schemaVersion": 1,
+            "kind": "capacity-progress",
+            "status": "paused",
+            "scenario": scenario,
+            "contenders": list(contenders),
+            "completedTrials": len(all_trials),
+            "newTrialsThisSession": budget.completed_units,
+            "output": str(output),
+        }
+
+    def run_or_resume(
+        contender: str,
+        *,
+        path: Path,
+        mode: str,
+        repetition: int,
+        rate: float,
+    ) -> dict[str, Any]:
+        if path.exists():
+            trial = _load_resumable_trial(
+                path,
+                contender=contender,
+                scenario=scenario,
+                mode=mode,
+                repetition=repetition,
+                offered_rate=rate,
+                expected_provenance=expected_provenance,
+            )
+        else:
+            if not budget.can_start():
+                raise _CapacityPaused
+            trial = trial_runner(
+                root,
+                contender,
+                scenario=scenario,
+                output=path,
+                mode=mode,
+                repetition=repetition,
+                offered_rate=rate,
+                reference_tokens=fresh_reference_tokens(repetition),
+                pause_database_after=True,
+            )
+            budget.record_completed()
+        all_trials.append(trial)
+        return trial
+
     for contender in contenders:
         attempt_number = 0
 
         def measure(rate: float) -> dict[str, Any]:
             nonlocal attempt_number
             attempt_number += 1
-            trial = trial_runner(
-                root,
+            trial = run_or_resume(
                 contender,
-                scenario=scenario,
-                output=trial_directory
+                path=trial_directory
                 / f"calibration-{contender}-{attempt_number:02d}-{rate}.json",
                 mode="calibration",
                 repetition=1,
-                offered_rate=rate,
-                reference_tokens=fresh_reference_tokens(1),
+                rate=rate,
             )
-            all_trials.append(trial)
             return trial
 
-        calibration = calibrate_boundary(measure)
+        try:
+            calibration = calibrate_boundary(measure)
+        except _CapacityPaused:
+            return pause_progress()
         calibrations[contender] = calibration
         boundaries[contender] = float(calibration["passingRate"])
 
@@ -244,23 +388,20 @@ def run_capacity_sweep(
     for scheduled in plan:
         for contender in scheduled["contenders"]:
             rate = float(scheduled["offeredRates"][contender])
-            trial = trial_runner(
-                root,
-                contender,
-                scenario=scenario,
-                output=trial_directory
-                / (
+            path = trial_directory / (
                     f"measurement-{scheduled['targetPercent']:03d}-"
                     f"{scheduled['repetition']}-{contender}-{rate:g}.json"
-                ),
-                mode="trial",
-                repetition=int(scheduled["repetition"]),
-                offered_rate=rate,
-                reference_tokens=fresh_reference_tokens(
-                    int(scheduled["repetition"])
-                ),
-            )
-            all_trials.append(trial)
+                )
+            try:
+                trial = run_or_resume(
+                    contender,
+                    path=path,
+                    mode="trial",
+                    repetition=int(scheduled["repetition"]),
+                    rate=rate,
+                )
+            except _CapacityPaused:
+                return pause_progress()
             measurement = json.loads(json.dumps(trial))
             measurement["targetPercent"] = int(scheduled["targetPercent"])
             measurements.append(measurement)

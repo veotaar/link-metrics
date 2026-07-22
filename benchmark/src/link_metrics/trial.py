@@ -49,6 +49,7 @@ from link_metrics.runtime import (
     _migration_version,
     _published_port,
     _resource_names,
+    _wait_for_postgres,
     _wait_for_readiness,
     inspect_contender,
     start_contender,
@@ -921,6 +922,9 @@ def _ensure_fresh_contender(root: Path, contender_id: str) -> bool:
     if not _container_exists(names.database):
         start_contender(root, contender_id)
         return True
+    if not bool(_container_document(names.database)["State"]["Running"]):
+        _docker("start", names.database)
+        _wait_for_postgres(names.database)
     _start_contender_container(root, contender_id)
     return False
 
@@ -935,6 +939,7 @@ def run_scenario_trial(
     repetition: int = 1,
     offered_rate: float | None = None,
     reference_tokens: ReferenceTokenCorpus | None = None,
+    pause_database_after: bool = False,
 ) -> dict[str, Any]:
     """Execute one Scenario Trial lifecycle and write its raw bundle."""
     root = root.resolve()
@@ -1149,3 +1154,6 @@ def run_scenario_trial(
             stop_contender(root, contender_id)
         else:
             _stop_contender_container(root, contender_id)
+            if pause_database_after:
+                names = _resource_names(root, contender_id)
+                _docker("stop", "--time", "5", names.database, check=False)
