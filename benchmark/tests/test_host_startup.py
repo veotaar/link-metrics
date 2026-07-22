@@ -8,6 +8,8 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from link_metrics.environment import (
     LOCAL_RESOURCE_PROFILE,
     assess_host_preflight,
@@ -15,6 +17,7 @@ from link_metrics.environment import (
 )
 from link_metrics.reporting import write_reports
 from link_metrics.progress import ExecutionBudget
+from link_metrics.results import ResultError
 from link_metrics.startup import (
     resume_cold_start_repetitions,
     summarize_cold_startup,
@@ -401,3 +404,52 @@ def test_reports_keep_cold_start_separate_from_warm_capacity(tmp_path: Path) -> 
     assert "Cold-start host execution evidence" in markdown
     assert "warm capacity" not in markdown.lower()
     assert "composite" not in markdown.lower()
+
+
+def test_reports_reject_cold_start_series_with_unlike_comparability_keys(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    samples = [
+        {
+            "repetition": repetition,
+            "readinessMs": 100.0,
+            "firstRequestMs": 5.0,
+            "readinessStatus": 204,
+            "firstRequestStatus": 201,
+        }
+        for repetition in range(1, 21)
+    ]
+    bundle = {
+        "schemaVersion": 1,
+        "kind": "cold-start-series",
+        "official": True,
+        "gitCommit": "abc123",
+        "apiContractVersion": "1.0.1",
+        "protocolVersion": "4.0.0",
+        "datasetVersion": "1.2.0",
+        "migrationVersion": "20260101000000",
+        "environment": {
+            "fingerprint": {"resourceProfile": "local-7800x3d", "kernel": "one"},
+            "preflight": {"valid": True},
+            "execution": {"valid": True},
+        },
+        "contender": {
+            "id": "express-node",
+            "imageDigest": "sha256:abc",
+            "manifest": {"id": "express-node"},
+        },
+        "lifecycle": {"processStartBoundary": "Docker State.StartedAt"},
+        "repetitions": samples,
+        "summary": summarize_cold_startup(samples),
+        "validity": {"valid": True, "reasons": []},
+    }
+    first.write_text(json.dumps(bundle), encoding="utf-8")
+    changed = json.loads(json.dumps(bundle))
+    changed["contender"]["id"] = "hono-bun"
+    changed["environment"]["fingerprint"]["kernel"] = "two"
+    second.write_text(json.dumps(changed), encoding="utf-8")
+
+    with pytest.raises(ResultError, match="unlike comparability keys"):
+        write_reports([first, second], tmp_path / "report")

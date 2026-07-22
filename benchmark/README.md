@@ -129,8 +129,9 @@ echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost
 uv run link-metrics host preflight
 ```
 
-Advance the series for up to four hours. The command checks the budget before starting each
-Trial or cold-start repetition, so the current atomic unit may finish after the deadline.
+Advance the series for up to four hours. The command checks the budget before preparing each
+Contender and before starting each Trial or cold-start repetition, so the current preparation
+or atomic unit may finish after the deadline.
 Run the exact same command on later days; completed create-only evidence is validated and
 reused rather than rerun. `Ctrl-C` is also safe between sessions: an interrupted unit without
 a completed evidence file is the only unit attempted again.
@@ -143,8 +144,9 @@ uv run link-metrics series run \
 ```
 
 Progress JSON names completed Scenarios and cold-start series. When `status` becomes
-`complete`, the raw bundles, generated report, and `manifest.json` are ready. Verify them at
-any time without running a benchmark:
+`complete`, the raw bundles, generated report, and `manifest.json` are ready. Verification
+checks the complete raw/report inventory and checksums, revalidates raw provenance, regenerates
+the reports, and compares them byte-for-byte without running a benchmark:
 
 ```sh
 uv run link-metrics series verify \

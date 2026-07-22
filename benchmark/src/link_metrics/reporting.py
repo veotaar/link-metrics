@@ -355,6 +355,11 @@ def write_reports(raw_paths: Sequence[Path], output_dir: Path) -> dict[str, Any]
         }
     else:
         raise ResultError("at least one raw Result Series is required")
+    if any(
+        startup["comparabilityKey"] != summary["comparabilityKey"]
+        for startup in cold_startups
+    ):
+        raise ResultError("raw Result Series have unlike comparability keys")
     summary["repetitionSeeds"] = repetition_seeds
     summary["calibration"] = _compact_calibration(calibration)
     summary["coldStartup"] = sorted(cold_startups, key=lambda item: item["contender"])

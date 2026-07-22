@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from link_metrics.dataset_runtime import build_template
+from link_metrics.dataset_runtime import prepare_template_runtime
 from link_metrics.environment import (
     LOCAL_RESOURCE_PROFILE,
     assess_host_preflight,
@@ -18,17 +19,8 @@ from link_metrics.evidence import write_immutable_json
 from link_metrics.progress import ExecutionBudget
 from link_metrics.reporting import write_reports
 from link_metrics.results import run_capacity_sweep
-from link_metrics.runtime import (
-    _container_document,
-    _container_exists,
-    _docker,
-    _resource_names,
-    _wait_for_postgres,
-    start_contender,
-)
 from link_metrics.scenarios import SCENARIOS
 from link_metrics.startup import run_cold_startup
-from link_metrics.trial import _stop_contender_container
 
 
 class SeriesError(Exception):
@@ -37,15 +29,7 @@ class SeriesError(Exception):
 
 def prepare_series_contender(root: Path, contender_id: str) -> None:
     """Keep one migrated, templated PostgreSQL container ready across sessions."""
-    names = _resource_names(root, contender_id)
-    if not _container_exists(names.database):
-        start_contender(root, contender_id)
-    elif not bool(_container_document(names.database)["State"]["Running"]):
-        _docker("start", names.database)
-        _wait_for_postgres(names.database)
-    build_template(root, contender_id)
-    _stop_contender_container(root, contender_id)
-    _docker("stop", "--time", "5", names.database, check=False)
+    prepare_template_runtime(root, contender_id)
 
 
 def _sha256(path: Path) -> str:
@@ -56,7 +40,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_result_series(output_dir: Path) -> dict[str, Any]:
+def verify_result_series(
+    output_dir: Path,
+    *,
+    report_regenerator: Callable[..., dict[str, Any]] = write_reports,
+) -> dict[str, Any]:
     """Verify every raw and generated file named by the series manifest."""
     output_dir = output_dir.resolve()
     manifest_path = output_dir / "manifest.json"
@@ -67,6 +55,15 @@ def verify_result_series(output_dir: Path) -> dict[str, Any]:
         raise SeriesError(f"cannot read Result Series manifest: {manifest_path}") from error
     if manifest.get("kind") != "result-series-manifest" or not isinstance(checksums, dict):
         raise SeriesError(f"invalid Result Series manifest: {manifest_path}")
+    actual_published = {
+        str(path.relative_to(output_dir))
+        for directory in (output_dir / "raw", output_dir / "report")
+        if directory.is_dir()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+    if set(checksums) != actual_published:
+        raise SeriesError("Result Series manifest does not cover every published file")
     for relative, expected in sorted(checksums.items()):
         path = (output_dir / str(relative)).resolve()
         if output_dir not in path.parents or not path.is_file():
@@ -75,6 +72,35 @@ def verify_result_series(output_dir: Path) -> dict[str, Any]:
             )
         if _sha256(path) != expected:
             raise SeriesError(f"checksum mismatch for Result Series file: {relative}")
+    raw_paths = [
+        *sorted((output_dir / "raw" / "capacity").glob("*.json")),
+        *sorted((output_dir / "raw" / "startup").glob("*.json")),
+    ]
+    if not raw_paths:
+        raise SeriesError("Result Series manifest contains no raw bundles")
+    try:
+        with tempfile.TemporaryDirectory(prefix="link-metrics-verify-") as temporary:
+            regenerated_dir = Path(temporary)
+            regenerated = report_regenerator(raw_paths, regenerated_dir)
+            if regenerated.get("comparabilityKey") != manifest.get("comparabilityKey"):
+                raise SeriesError("regenerated report provenance does not match the manifest")
+            for relative in sorted(checksums):
+                relative_path = Path(str(relative))
+                if not relative_path.parts or relative_path.parts[0] != "report":
+                    continue
+                published = output_dir / relative_path
+                regenerated_path = regenerated_dir / Path(*relative_path.parts[1:])
+                if (
+                    not regenerated_path.is_file()
+                    or published.read_bytes() != regenerated_path.read_bytes()
+                ):
+                    raise SeriesError(
+                        f"regenerated report mismatch for Result Series file: {relative}"
+                    )
+    except SeriesError:
+        raise
+    except Exception as error:
+        raise SeriesError(f"cannot regenerate Result Series reports: {error}") from error
     return {
         "schemaVersion": 1,
         "kind": "result-series-verification",
@@ -113,6 +139,7 @@ def run_result_series(
     capacity_runner: Callable[..., dict[str, Any]] = run_capacity_sweep,
     startup_runner: Callable[..., dict[str, Any]] = run_cold_startup,
     report_writer: Callable[..., dict[str, Any]] = write_reports,
+    result_verifier: Callable[[Path], dict[str, Any]] = verify_result_series,
     preflight: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Advance the complete cohort until the daily budget expires or work completes."""
@@ -123,7 +150,7 @@ def run_result_series(
         raise SeriesError("a Result Series requires unique Contenders")
     manifest_path = output_dir / "manifest.json"
     if manifest_path.exists():
-        verification = verify_result_series(output_dir)
+        verification = result_verifier(output_dir)
         return {
             **verification,
             "kind": "result-series-progress",
@@ -145,6 +172,8 @@ def run_result_series(
         return _progress(output_dir, contenders, [], [], budget)
 
     for contender in contenders:
+        if not budget.can_start():
+            return _progress(output_dir, contenders, [], [], budget)
         prepare_contender(root, contender)
 
     capacity_paths: list[Path] = []
@@ -205,7 +234,7 @@ def run_result_series(
         )
     except (FileExistsError, KeyError) as error:
         raise SeriesError(f"cannot publish Result Series manifest: {manifest_path}") from error
-    verification = verify_result_series(output_dir)
+    verification = result_verifier(output_dir)
     return {
         **verification,
         "kind": "result-series-progress",

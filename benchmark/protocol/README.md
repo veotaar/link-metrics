@@ -54,5 +54,7 @@ seeded, healthy, and prewarmed PostgreSQL Dataset. Each repetition creates the s
 container and resets the Dataset before timing, anchors timing to Docker's recorded process
 `StartedAt`, records the first
 `/health` 204 and the latency of the first registration request, and excludes image build,
-pull, migrations, and seeding. Reports publish median and p95 startup values separately
+pull, migrations, and seeding. Its environment fingerprint reserves the same k6 resource
+profile as capacity Trials so every published series has one exact comparability key, but no
+load generator runs during startup measurement. Reports publish median and p95 startup values separately
 from steady-state capacity and never combine them into a score.

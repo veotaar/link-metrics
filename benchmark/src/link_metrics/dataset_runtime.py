@@ -23,6 +23,11 @@ from link_metrics.runtime import (
     _docker,
     _find_manifest,
     _resource_names,
+    ensure_database_running,
+    pause_database_container,
+    remove_contender_container,
+    start_contender,
+    stop_contender,
     _wait_for_readiness,
 )
 
@@ -491,6 +496,28 @@ ALTER DATABASE {template} WITH IS_TEMPLATE true ALLOW_CONNECTIONS false;
         },
         **metadata,
     }
+
+
+def prepare_template_runtime(root: Path, contender_id: str) -> dict[str, Any]:
+    """Prepare or resume one persistent Dataset template, then pause its containers."""
+    root = root.resolve()
+    names = _resource_names(root, contender_id)
+    try:
+        if _container_exists(names.database):
+            ensure_database_running(root, contender_id)
+        else:
+            start_contender(root, contender_id)
+        try:
+            return build_template(root, contender_id)
+        except DatasetError as error:
+            if "Trial database must be empty" not in str(error):
+                raise
+            stop_contender(root, contender_id)
+            start_contender(root, contender_id)
+            return build_template(root, contender_id)
+    finally:
+        remove_contender_container(root, contender_id)
+        pause_database_container(root, contender_id)
 
 
 def reset_from_template(

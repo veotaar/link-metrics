@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import platform
 import re
 import subprocess
 import time
@@ -27,6 +25,7 @@ from link_metrics.environment import (
     LOCAL_RESOURCE_PROFILE,
     assess_host_preflight,
     capture_host_observation,
+    host_identity,
     summarize_host_execution,
 )
 from link_metrics.scenarios import (
@@ -52,6 +51,9 @@ from link_metrics.runtime import (
     _wait_for_postgres,
     _wait_for_readiness,
     inspect_contender,
+    image_digest,
+    pause_database_container,
+    remove_contender_container,
     start_contender,
     stop_contender,
 )
@@ -226,35 +228,6 @@ def _api_contract_version(root: Path) -> str:
     raise TrialError("API Contract version is missing from openapi.yaml")
 
 
-def _image_digest(image: str) -> str:
-    result = _docker(
-        "image",
-        "inspect",
-        "--format",
-        "{{json .RepoDigests}}",
-        image,
-        check=False,
-    )
-    if result.returncode != 0:
-        # Fall back to image ID when RepoDigests are empty for locally tagged builds.
-        identity = _docker(
-            "image",
-            "inspect",
-            "--format",
-            "{{.Id}}",
-            image,
-            check=False,
-        )
-        if identity.returncode != 0:
-            raise TrialError(f"cannot inspect image digest for {image}")
-        return identity.stdout.strip()
-    digests = json.loads(result.stdout)
-    if digests:
-        return digests[0].split("@", 1)[-1] if "@" in digests[0] else digests[0]
-    identity = _docker("image", "inspect", "--format", "{{.Id}}", image)
-    return identity.stdout.strip()
-
-
 def _container_limits(container: str) -> dict[str, Any]:
     document = _container_document(container)
     host_config = document["HostConfig"]
@@ -274,7 +247,6 @@ def _environment_fingerprint(
     host_observation: dict[str, Any],
     resource_profile: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     names = _resource_names(root, contender["id"])
     containers = {
         "contender": _container_limits(names.contender),
@@ -285,13 +257,8 @@ def _environment_fingerprint(
     fingerprint = {
         "resourceProfile": resource_profile["id"] if resource_profile is not None else None,
         "resourceProfileDefinition": resource_profile,
-        "hostname": platform.node(),
-        "kernel": platform.release(),
-        "machine": platform.machine(),
         "cpuModel": host_observation.get("cpuModel"),
-        "python": platform.python_version(),
-        "cpus": os.cpu_count(),
-        "memoryBytes": memory,
+        **host_identity(),
         "postgresImage": POSTGRES_IMAGE,
         "containers": containers,
     }
@@ -904,13 +871,6 @@ def _start_contender_container(root: Path, contender_id: str) -> None:
     _wait_for_readiness(_contender_url(document, contender["port"]))
 
 
-def _stop_contender_container(root: Path, contender_id: str) -> None:
-    names = _resource_names(root, contender_id)
-    if _container_exists(names.contender):
-        _docker("stop", "--time", "5", names.contender, check=False)
-        _docker("container", "rm", "--force", names.contender)
-
-
 def _ensure_fresh_contender(root: Path, contender_id: str) -> bool:
     """Ensure PostgreSQL is up and start a brand-new Contender container.
 
@@ -1074,7 +1034,7 @@ def run_scenario_trial(
             }
         )
         names = _resource_names(root, contender_id)
-        image_digest = _image_digest(names.image)
+        contender_image_digest = image_digest(names.image)
         return write_result_bundle(
             output,
             {
@@ -1091,7 +1051,7 @@ def run_scenario_trial(
                 "workloadSeed": seed,
                 "contender": {
                     "id": contender_id,
-                    "imageDigest": image_digest,
+                    "imageDigest": contender_image_digest,
                     "manifest": contender,
                 },
                 "environment": {
@@ -1153,7 +1113,6 @@ def run_scenario_trial(
         if owns_stack:
             stop_contender(root, contender_id)
         else:
-            _stop_contender_container(root, contender_id)
+            remove_contender_container(root, contender_id)
             if pause_database_after:
-                names = _resource_names(root, contender_id)
-                _docker("stop", "--time", "5", names.database, check=False)
+                pause_database_container(root, contender_id)

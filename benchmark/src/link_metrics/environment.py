@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import re
 from pathlib import Path
 from typing import Any, Sequence
@@ -36,6 +37,18 @@ LOCAL_RESOURCE_PROFILE: dict[str, Any] = {
 
 _ROLE_NAMES = ("contender", "postgres", "k6")
 _CPU_HWMON_DRIVERS = {"coretemp", "k10temp", "zenpower", "cpu_thermal"}
+
+
+def host_identity() -> dict[str, Any]:
+    """Return stable host fields shared by fingerprints and resume validation."""
+    return {
+        "hostname": platform.node(),
+        "kernel": platform.release(),
+        "machine": platform.machine(),
+        "python": platform.python_version(),
+        "cpus": os.cpu_count(),
+        "memoryBytes": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"),
+    }
 
 
 def _parse_cpu_set(value: str) -> list[int]:

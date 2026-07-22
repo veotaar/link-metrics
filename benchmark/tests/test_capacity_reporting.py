@@ -65,7 +65,11 @@ def trial_bundle(
         "scenario": scenario,
         "repetition": repetition,
         "workloadSeed": SEEDS[repetition - 1],
-        "contender": {"id": contender},
+        "contender": {
+            "id": contender,
+            "imageDigest": f"sha256:{contender}",
+            "manifest": {"id": contender},
+        },
         "environment": {
             "fingerprint": {
                 "profileVersion": environment,
@@ -603,6 +607,122 @@ def test_capacity_resume_rejects_evidence_from_another_repository_commit(
             output=output,
             trial_runner=run_trial,
             budget=ExecutionBudget(),
+        )
+
+
+def test_capacity_resume_rejects_evidence_from_another_contender_image(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "registration.json"
+    original = {
+        "express-node": {
+            "id": "express-node",
+            "imageDigest": "sha256:express-node",
+            "manifest": {"id": "express-node"},
+        }
+    }
+
+    def run_trial(
+        root: Path,
+        contender_id: str,
+        *,
+        output: Path,
+        mode: str,
+        repetition: int,
+        offered_rate: float,
+        scenario: str,
+        reference_tokens: object | None = None,
+        pause_database_after: bool = False,
+    ) -> dict[str, Any]:
+        del root, reference_tokens
+        assert pause_database_after is True
+        bundle = trial_bundle(
+            repetition,
+            scenario=scenario,
+            contender=contender_id,
+            offered_rate=offered_rate,
+            achieved_iterations=round(offered_rate * 60),
+            p99_ms=200,
+        )
+        bundle["official"] = mode == "trial"
+        bundle["mode"] = mode
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(bundle), encoding="utf-8")
+        return bundle
+
+    run_capacity_sweep(
+        REPOSITORY_ROOT,
+        ["express-node"],
+        scenario="registration",
+        output=output,
+        trial_runner=run_trial,
+        budget=ExecutionBudget(maximum_units=1),
+        expected_contenders=original,
+    )
+    rebuilt = json.loads(json.dumps(original))
+    rebuilt["express-node"]["imageDigest"] = "sha256:rebuilt"
+
+    with pytest.raises(ResultError, match="does not match its schedule"):
+        run_capacity_sweep(
+            REPOSITORY_ROOT,
+            ["express-node"],
+            scenario="registration",
+            output=output,
+            trial_runner=run_trial,
+            budget=ExecutionBudget(),
+            expected_contenders=rebuilt,
+        )
+
+
+def test_completed_capacity_series_is_revalidated_before_reuse(tmp_path: Path) -> None:
+    output = tmp_path / "registration.json"
+
+    def run_trial(
+        root: Path,
+        contender_id: str,
+        *,
+        output: Path,
+        mode: str,
+        repetition: int,
+        offered_rate: float,
+        scenario: str,
+        reference_tokens: object | None = None,
+        pause_database_after: bool = False,
+    ) -> dict[str, Any]:
+        del root, reference_tokens
+        assert pause_database_after is True
+        bundle = trial_bundle(
+            repetition,
+            scenario=scenario,
+            contender=contender_id,
+            offered_rate=offered_rate,
+            achieved_iterations=round(offered_rate * 60),
+            p99_ms=200 if offered_rate <= 100 else 1_001,
+        )
+        bundle["official"] = mode == "trial"
+        bundle["mode"] = mode
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(bundle), encoding="utf-8")
+        return bundle
+
+    run_capacity_sweep(
+        REPOSITORY_ROOT,
+        ["express-node"],
+        scenario="registration",
+        output=output,
+        trial_runner=run_trial,
+    )
+    completed = json.loads(output.read_text(encoding="utf-8"))
+    completed["measurements"][0]["gitCommit"] = "different-commit"
+    output.write_text(json.dumps(completed), encoding="utf-8")
+
+    with pytest.raises(ResultError, match="incompatible evidence"):
+        run_capacity_sweep(
+            REPOSITORY_ROOT,
+            ["express-node"],
+            scenario="registration",
+            output=output,
+            trial_runner=run_trial,
         )
 
 

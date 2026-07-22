@@ -86,6 +86,9 @@ def test_complete_series_resumes_across_bounded_daily_sessions(tmp_path: Path) -
         capacity_runner=capacity,
         startup_runner=startup,
         report_writer=report,
+        result_verifier=lambda output: verify_result_series(
+            output, report_regenerator=report
+        ),
         preflight=lambda: {"valid": True, "reasons": []},
     )
 
@@ -103,6 +106,9 @@ def test_complete_series_resumes_across_bounded_daily_sessions(tmp_path: Path) -
         capacity_runner=capacity,
         startup_runner=startup,
         report_writer=report,
+        result_verifier=lambda output: verify_result_series(
+            output, report_regenerator=report
+        ),
         preflight=lambda: {"valid": True, "reasons": []},
     )
 
@@ -110,7 +116,7 @@ def test_complete_series_resumes_across_bounded_daily_sessions(tmp_path: Path) -
     assert capacity_calls == list(SCENARIOS)
     assert startup_calls == list(CONTENDERS)
     assert prepare_calls == list(CONTENDERS)
-    assert verify_result_series(tmp_path)["valid"] is True
+    assert verify_result_series(tmp_path, report_regenerator=report)["valid"] is True
 
 
 def test_series_verification_rejects_changed_generated_or_raw_evidence(tmp_path: Path) -> None:
@@ -120,9 +126,13 @@ def test_series_verification_rejects_changed_generated_or_raw_evidence(tmp_path:
     report = tmp_path / "report" / "summary.json"
     report.parent.mkdir(parents=True)
     report.write_text("{}\n", encoding="utf-8")
+    markdown = report.parent / "report.md"
+    markdown.write_text("report.md\n", encoding="utf-8")
+    html = report.parent / "report.html"
+    html.write_text("report.html\n", encoding="utf-8")
     checksums = {
         str(path.relative_to(tmp_path)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in (evidence, report)
+        for path in (evidence, report, markdown, html)
     }
     (tmp_path / "manifest.json").write_text(
         json.dumps({"kind": "result-series-manifest", "checksums": checksums}),
@@ -130,9 +140,48 @@ def test_series_verification_rejects_changed_generated_or_raw_evidence(tmp_path:
     )
 
     report.write_text('{"changed":true}\n', encoding="utf-8")
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    manifest["checksums"]["report/summary.json"] = hashlib.sha256(
+        report.read_bytes()
+    ).hexdigest()
+    manifest["comparabilityKey"] = {"profile": "local-7800x3d"}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(SeriesError, match="checksum mismatch"):
-        verify_result_series(tmp_path)
+    def regenerate(raw: list[Path], output: Path) -> dict[str, Any]:
+        assert raw == [evidence]
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "summary.json").write_text("{}\n", encoding="utf-8")
+        (output / "report.md").write_text("report.md\n", encoding="utf-8")
+        (output / "report.html").write_text("report.html\n", encoding="utf-8")
+        return {"comparabilityKey": {"profile": "local-7800x3d"}}
+
+    with pytest.raises(SeriesError, match="regenerated report mismatch"):
+        verify_result_series(tmp_path, report_regenerator=regenerate)
+
+
+def test_series_stops_preparation_when_the_daily_deadline_expires(tmp_path: Path) -> None:
+    now = [0.0]
+    prepared: list[str] = []
+
+    def prepare(root: Path, contender: str) -> None:
+        del root
+        prepared.append(contender)
+        now[0] = 2.0
+
+    result = run_result_series(
+        REPOSITORY_ROOT,
+        output_dir=tmp_path,
+        contenders=CONTENDERS,
+        budget=ExecutionBudget(deadline=1.0, clock=lambda: now[0]),
+        prepare_contender=prepare,
+        capacity_runner=lambda *args, **kwargs: pytest.fail("capacity must not start"),
+        startup_runner=lambda *args, **kwargs: pytest.fail("startup must not start"),
+        report_writer=lambda *args, **kwargs: pytest.fail("report must not start"),
+        preflight=lambda: {"valid": True, "reasons": []},
+    )
+
+    assert result["status"] == "paused"
+    assert prepared == [CONTENDERS[0]]
 
 
 def test_series_cli_requires_a_daily_time_budget_and_exposes_verification() -> None:

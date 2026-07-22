@@ -6,8 +6,6 @@ import hashlib
 import itertools
 import json
 import math
-import os
-import platform
 import random
 import statistics
 import subprocess
@@ -23,7 +21,9 @@ from link_metrics.dataset import (
     describe_dataset,
 )
 from link_metrics.evidence import write_immutable_json
+from link_metrics.environment import host_identity
 from link_metrics.progress import ExecutionBudget
+from link_metrics.runtime import contender_provenance
 from link_metrics.scenarios import P99_BUDGETS_MS, PROTECTED_SCENARIOS
 
 
@@ -47,27 +47,23 @@ def _load_resumable_trial(
     repetition: int,
     offered_rate: float,
     expected_provenance: dict[str, Any],
+    expected_contender: dict[str, Any] | None,
 ) -> dict[str, Any]:
     try:
         bundle = json.loads(path.read_text(encoding="utf-8"))
-        matches = (
-            isinstance(bundle, dict)
-            and bundle.get("contender", {}).get("id") == contender
-            and bundle.get("scenario") == scenario
-            and bundle.get("mode") == mode
-            and int(bundle.get("repetition")) == repetition
-            and float(bundle.get("workload", {}).get("offeredRate")) == offered_rate
-            and bool(bundle.get("official")) is (mode == "trial")
-            and all(bundle.get(key) == value for key, value in expected_provenance.items())
-            and all(
-                bundle.get("environment", {}).get("fingerprint", {}).get(key) == value
-                for key, value in _current_host_identity().items()
-            )
+        if not isinstance(bundle, dict):
+            raise ResultError("resumable Trial is not an object")
+        _validate_resumable_trial(
+            bundle,
+            contender=contender,
+            scenario=scenario,
+            mode=mode,
+            repetition=repetition,
+            offered_rate=offered_rate,
+            expected_provenance=expected_provenance,
+            expected_contender=expected_contender,
         )
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        matches = False
-        bundle = None
-    if not matches or not isinstance(bundle, dict):
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, ResultError):
         raise ResultError(f"existing resumable Trial does not match its schedule: {path}")
     return bundle
 
@@ -85,19 +81,14 @@ def _repository_commit(root: Path) -> str:
     return result.stdout.strip()
 
 
-def _current_host_identity() -> dict[str, Any]:
-    return {
-        "hostname": platform.node(),
-        "kernel": platform.release(),
-        "machine": platform.machine(),
-        "python": platform.python_version(),
-        "cpus": os.cpu_count(),
-        "memoryBytes": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"),
-    }
-
-
 def _load_completed_series(
-    output: Path, contenders: Sequence[str], scenario: str
+    output: Path,
+    contenders: Sequence[str],
+    scenario: str,
+    *,
+    expected_provenance: dict[str, Any],
+    expected_contenders: dict[str, dict[str, Any]],
+    repetition_seeds: Sequence[int],
 ) -> dict[str, Any]:
     try:
         document = json.loads(output.read_text(encoding="utf-8"))
@@ -107,14 +98,114 @@ def _load_completed_series(
     except (OSError, json.JSONDecodeError, KeyError, TypeError):
         document = None
         measured_contenders = set()
-    if (
-        not isinstance(document, dict)
-        or document.get("kind") != "result-series"
-        or document.get("scenario") != scenario
-        or measured_contenders != set(contenders)
-    ):
+    try:
+        if (
+            not isinstance(document, dict)
+            or document.get("kind") != "result-series"
+            or document.get("scenario") != scenario
+            or measured_contenders != set(contenders)
+            or document.get("repetitionSeeds") != list(repetition_seeds)
+        ):
+            raise ResultError("series identity does not match")
+        calibrations = document["calibration"]
+        boundaries = {
+            contender: float(calibrations[contender]["passingRate"])
+            for contender in contenders
+        }
+        all_trials: list[dict[str, Any]] = []
+        for contender in contenders:
+            for attempt, sample in enumerate(calibrations[contender]["samples"], start=1):
+                rate = float(sample["offeredRate"])
+                trial = sample["trial"]
+                if bool(sample["passed"]) is not _trial_passes(trial):
+                    raise ResultError("calibration outcome does not match its Trial")
+                _validate_resumable_trial(
+                    trial,
+                    contender=contender,
+                    scenario=scenario,
+                    mode="calibration",
+                    repetition=1,
+                    offered_rate=rate,
+                    expected_provenance=expected_provenance,
+                    expected_contender=expected_contenders.get(contender),
+                )
+                all_trials.append(trial)
+        plan = measurement_plan(
+            contenders,
+            boundaries,
+            repetition_seeds,
+            scenario=scenario,
+        )
+        if document.get("measurementPlan") != plan:
+            raise ResultError("measurement plan does not match calibration")
+        measurements = document["measurements"]
+        expected_measurements = [
+            (
+                contender,
+                int(scheduled["repetition"]),
+                int(scheduled["targetPercent"]),
+                float(scheduled["offeredRates"][contender]),
+            )
+            for scheduled in plan
+            for contender in scheduled["contenders"]
+        ]
+        if len(measurements) != len(expected_measurements):
+            raise ResultError("measurement count does not match the plan")
+        for trial, (contender, repetition, target, rate) in zip(
+            measurements, expected_measurements, strict=True
+        ):
+            if int(trial.get("targetPercent")) != target:
+                raise ResultError("measurement target does not match the plan")
+            _validate_resumable_trial(
+                trial,
+                contender=contender,
+                scenario=scenario,
+                mode="trial",
+                repetition=repetition,
+                offered_rate=rate,
+                expected_provenance=expected_provenance,
+                expected_contender=expected_contenders.get(contender),
+            )
+            all_trials.append(trial)
+        if document.get("comparabilityKey") != _enforce_comparability(all_trials):
+            raise ResultError("published comparability key does not match its Trials")
+        summarize_trial_bundles(
+            measurements,
+            expected_repetition_seeds=repetition_seeds,
+        )
+    except (KeyError, TypeError, ValueError, ResultError) as error:
         raise ResultError(f"result bundle already exists with incompatible evidence: {output}")
+    assert isinstance(document, dict)
     return document
+
+
+def _validate_resumable_trial(
+    bundle: dict[str, Any],
+    *,
+    contender: str,
+    scenario: str,
+    mode: str,
+    repetition: int,
+    offered_rate: float,
+    expected_provenance: dict[str, Any],
+    expected_contender: dict[str, Any] | None,
+) -> None:
+    matches = (
+        bundle.get("contender", {}).get("id") == contender
+        and bundle.get("scenario") == scenario
+        and bundle.get("mode") == mode
+        and int(bundle.get("repetition")) == repetition
+        and float(bundle.get("workload", {}).get("offeredRate")) == offered_rate
+        and bool(bundle.get("official")) is (mode == "trial")
+        and all(bundle.get(key) == value for key, value in expected_provenance.items())
+        and all(
+            bundle.get("environment", {}).get("fingerprint", {}).get(key) == value
+            for key, value in host_identity().items()
+        )
+        and (expected_contender is None or bundle.get("contender") == expected_contender)
+    )
+    if not matches:
+        raise ResultError("resumable Trial does not match its schedule or provenance")
 
 
 def _trial_sample(bundle: dict[str, Any]) -> dict[str, Any]:
@@ -261,15 +352,15 @@ def run_capacity_sweep(
     output: Path,
     trial_runner: Callable[..., dict[str, Any]] | None = None,
     budget: ExecutionBudget | None = None,
+    expected_contenders: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Calibrate Contenders, run the official schedule, and write raw evidence."""
-    if output.exists():
-        return _load_completed_series(output, contenders, scenario)
     if scenario not in P99_BUDGETS_MS:
         raise ResultError(f"unknown Scenario: {scenario}")
     if len(set(contenders)) != len(contenders):
         raise ResultError("Contender identities must be unique")
-    if trial_runner is None:
+    uses_control_plane_runner = trial_runner is None
+    if uses_control_plane_runner:
         from link_metrics.trial import run_scenario_trial
 
         trial_runner = run_scenario_trial
@@ -286,6 +377,24 @@ def run_capacity_sweep(
         "datasetVersion": str(manifest["version"]),
     }
     repetition_seeds = [int(seed) for seed in manifest["repetitionSeeds"]]
+    if expected_contenders is None:
+        expected_contenders = (
+            {
+                contender: contender_provenance(root, contender)
+                for contender in contenders
+            }
+            if uses_control_plane_runner
+            else {}
+        )
+    if output.exists():
+        return _load_completed_series(
+            output,
+            contenders,
+            scenario,
+            expected_provenance=expected_provenance,
+            expected_contenders=expected_contenders,
+            repetition_seeds=repetition_seeds,
+        )
     trial_directory = output.parent / f"{output.stem}.trials"
     reference_tokens: ReferenceTokenCorpus | None = None
 
@@ -336,6 +445,7 @@ def run_capacity_sweep(
                 repetition=repetition,
                 offered_rate=rate,
                 expected_provenance=expected_provenance,
+                expected_contender=expected_contenders.get(contender),
             )
         else:
             if not budget.can_start():
@@ -350,6 +460,16 @@ def run_capacity_sweep(
                 offered_rate=rate,
                 reference_tokens=fresh_reference_tokens(repetition),
                 pause_database_after=True,
+            )
+            _validate_resumable_trial(
+                trial,
+                contender=contender,
+                scenario=scenario,
+                mode=mode,
+                repetition=repetition,
+                offered_rate=rate,
+                expected_provenance=expected_provenance,
+                expected_contender=expected_contenders.get(contender),
             )
             budget.record_completed()
         all_trials.append(trial)

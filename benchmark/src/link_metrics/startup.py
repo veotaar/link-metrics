@@ -33,6 +33,9 @@ from link_metrics.runtime import (
     _migration_version,
     _resource_names,
     _wait_for_postgres,
+    image_digest,
+    pause_database_container,
+    remove_contender_container,
 )
 from link_metrics.results import percentile
 from link_metrics.trial import (
@@ -44,9 +47,7 @@ from link_metrics.trial import (
     _contender_container_arguments,
     _environment_fingerprint,
     _git_commit,
-    _image_digest,
     _protocol_version,
-    _stop_contender_container,
 )
 
 
@@ -315,19 +316,6 @@ def run_cold_startup(
 ) -> dict[str, Any]:
     """Measure 20 process starts against an already-ready Benchmark Dataset."""
     root = root.resolve()
-    if output.exists():
-        try:
-            completed = json.loads(output.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise StartupError(
-                f"cold-start bundle already exists with invalid evidence: {output}"
-            ) from error
-        validate_cold_start_bundle(completed)
-        if completed.get("contender", {}).get("id") != contender_id:
-            raise StartupError(
-                f"cold-start bundle already exists for another Contender: {output}"
-            )
-        return completed
     if budget is None:
         budget = ExecutionBudget()
     contender = _find_manifest(root, contender_id)
@@ -348,7 +336,7 @@ def run_cold_startup(
             f"{error}; run `link-metrics dataset build {contender_id}` first"
         ) from error
 
-    _stop_contender_container(root, contender_id)
+    remove_contender_container(root, contender_id)
     try:
         _apply_container_profile(names.database, LOCAL_RESOURCE_PROFILE["postgres"])
         preflight = assess_host_preflight(
@@ -365,13 +353,56 @@ def run_cold_startup(
             fingerprint = _environment_fingerprint(
                 root,
                 contender,
-                k6_limits=None,
+                k6_limits={
+                    "cpusetCpus": LOCAL_RESOURCE_PROFILE["k6"]["cpusetCpus"],
+                    "memoryBytes": LOCAL_RESOURCE_PROFILE["k6"]["memoryBytes"],
+                    "memorySwapBytes": LOCAL_RESOURCE_PROFILE["k6"]["memorySwapBytes"],
+                    "nanoCpus": 2_000_000_000,
+                },
                 host_observation=preflight["observation"],
                 resource_profile=LOCAL_RESOURCE_PROFILE,
             )
         finally:
-            _stop_contender_container(root, contender_id)
-        image_digest = _image_digest(names.image)
+            remove_contender_container(root, contender_id)
+        contender_image_digest = image_digest(names.image)
+        repetition_provenance = {
+            "gitCommit": _git_commit(root),
+            "protocolVersion": _protocol_version(root),
+            "datasetVersion": describe_dataset(root)["version"],
+            "environmentFingerprint": fingerprint,
+            "contenderImageDigest": contender_image_digest,
+            "contenderManifest": contender,
+        }
+        if output.exists():
+            try:
+                completed = json.loads(output.read_text(encoding="utf-8"))
+                validate_cold_start_bundle(completed)
+                matches = (
+                    completed.get("gitCommit") == repetition_provenance["gitCommit"]
+                    and completed.get("protocolVersion")
+                    == repetition_provenance["protocolVersion"]
+                    and completed.get("datasetVersion")
+                    == repetition_provenance["datasetVersion"]
+                    and completed.get("environment", {}).get("fingerprint") == fingerprint
+                    and completed.get("contender")
+                    == {
+                        "id": contender_id,
+                        "imageDigest": contender_image_digest,
+                        "manifest": contender,
+                    }
+                    and all(
+                        sample.get("templateChecksum") == template["templateChecksum"]
+                        for sample in completed.get("repetitions", [])
+                    )
+                )
+            except (OSError, json.JSONDecodeError, TypeError, StartupError):
+                matches = False
+                completed = None
+            if not matches or not isinstance(completed, dict):
+                raise StartupError(
+                    f"cold-start bundle already exists with incompatible evidence: {output}"
+                )
+            return completed
 
         def measure(repetition: int) -> dict[str, Any]:
             reset = reset_from_template(root, contender_id, template["templateChecksum"])
@@ -406,7 +437,7 @@ def run_cold_startup(
                     "hostObservations": observations,
                 }
             finally:
-                _stop_contender_container(root, contender_id)
+                remove_contender_container(root, contender_id)
 
         progress = resume_cold_start_repetitions(
             output,
@@ -414,12 +445,7 @@ def run_cold_startup(
             template_checksum=str(template["templateChecksum"]),
             measure=measure,
             budget=budget,
-            provenance={
-                "gitCommit": _git_commit(root),
-                "protocolVersion": _protocol_version(root),
-                "datasetVersion": describe_dataset(root)["version"],
-                "environmentFingerprint": fingerprint,
-            },
+            provenance=repetition_provenance,
         )
         if progress["status"] == "paused":
             return progress
@@ -456,7 +482,7 @@ def run_cold_startup(
                 "migrationVersion": _migration_version(root),
                 "contender": {
                     "id": contender_id,
-                    "imageDigest": image_digest,
+                    "imageDigest": contender_image_digest,
                     "manifest": contender,
                 },
                 "environment": {
@@ -467,7 +493,13 @@ def run_cold_startup(
                 },
                 "lifecycle": {
                     "databaseReadyBeforeProcessStart": True,
-                    "excluded": ["imageBuild", "imagePull", "migrations", "seeding"],
+                    "excluded": [
+                        "imageBuild",
+                        "imagePull",
+                        "migrations",
+                        "seeding",
+                        "loadGeneration",
+                    ],
                     "processStartBoundary": "Docker State.StartedAt",
                     "readiness": "first /health 204",
                     "firstRequest": "POST /api/auth/register",
@@ -480,6 +512,5 @@ def run_cold_startup(
     except (ContenderRuntimeError, DatasetError, TrialError) as error:
         raise StartupError(str(error)) from error
     finally:
-        _stop_contender_container(root, contender_id)
-        if _container_exists(names.database):
-            _docker("stop", "--time", "5", names.database, check=False)
+        remove_contender_container(root, contender_id)
+        pause_database_container(root, contender_id)

@@ -82,6 +82,73 @@ def _network_exists(name: str) -> bool:
     return _docker("network", "inspect", name, check=False).returncode == 0
 
 
+def ensure_database_running(root: Path, contender_id: str) -> None:
+    """Start an existing prepared PostgreSQL container when it is paused."""
+    names = _resource_names(root.resolve(), contender_id)
+    if not _container_exists(names.database):
+        raise ContenderRuntimeError(
+            f"Contender '{contender_id}' has no prepared PostgreSQL container"
+        )
+    if not bool(_container_document(names.database)["State"]["Running"]):
+        _docker("start", names.database)
+        _wait_for_postgres(names.database)
+
+
+def remove_contender_container(root: Path, contender_id: str) -> None:
+    """Remove the disposable Contender process while preserving PostgreSQL."""
+    container = _resource_names(root.resolve(), contender_id).contender
+    if _container_exists(container):
+        _docker("stop", "--time", "5", container, check=False)
+        _docker("container", "rm", "--force", container)
+
+
+def pause_database_container(root: Path, contender_id: str) -> None:
+    """Stop a prepared PostgreSQL container without removing its Dataset template."""
+    database = _resource_names(root.resolve(), contender_id).database
+    if _container_exists(database):
+        _docker("stop", "--time", "5", database, check=False)
+
+
+def image_digest(image: str) -> str:
+    """Return a registry digest or the immutable local image ID."""
+    result = _docker(
+        "image",
+        "inspect",
+        "--format",
+        "{{json .RepoDigests}}",
+        image,
+        check=False,
+    )
+    if result.returncode != 0:
+        identity = _docker(
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            image,
+            check=False,
+        )
+        if identity.returncode != 0:
+            raise ContenderRuntimeError(f"cannot inspect image digest for {image}")
+        return identity.stdout.strip()
+    digests = json.loads(result.stdout)
+    if digests:
+        return digests[0].split("@", 1)[-1] if "@" in digests[0] else digests[0]
+    identity = _docker("image", "inspect", "--format", "{{.Id}}", image)
+    return identity.stdout.strip()
+
+
+def contender_provenance(root: Path, contender_id: str) -> dict[str, Any]:
+    """Return the current manifest and immutable image identity for a Contender."""
+    manifest = _find_manifest(root.resolve(), contender_id)
+    image = _resource_names(root.resolve(), contender_id).image
+    return {
+        "id": contender_id,
+        "imageDigest": image_digest(image),
+        "manifest": manifest,
+    }
+
+
 def _migration_version(root: Path) -> str:
     migrations = sorted((root / "database" / "migrations").glob("*.sql"))
     if not migrations:
