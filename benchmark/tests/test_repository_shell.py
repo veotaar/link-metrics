@@ -145,6 +145,7 @@ def test_hosted_ci_is_a_discovery_driven_correctness_gate() -> None:
         "trial smoke",
         "trial run",
         "capacity run",
+        "lite run",
         "startup run",
         "report generate",
     )

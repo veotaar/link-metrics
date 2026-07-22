@@ -66,6 +66,17 @@ Replace `registration` with `login`, `short-link-creation`, `statistics`,
 `uniform-resolution`, or `viral-resolution` to calibrate and report that success-path
 Scenario independently.
 
+For a fast, explicitly non-publishable comparison across the local cohort, run:
+
+```sh
+uv run link-metrics lite run --max-hours 2 --root ..
+```
+
+Lite mode defaults to Short Link creation and uniform resolution, prints a terminal-only
+capacity estimate, and does not create a Result Series. See
+[`benchmark/README.md`](benchmark/README.md) for its selectable Contenders and Scenarios,
+short Trial lifecycle, and wall-clock budget behavior.
+
 For the complete four-Contender Result Series, use the resumable daily workflow documented
 in [`benchmark/README.md`](benchmark/README.md#run-the-complete-local-series-over-multiple-days).
 It accepts a wall-clock budget, preserves completed atomic evidence across sessions, and

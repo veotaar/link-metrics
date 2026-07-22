@@ -79,6 +79,7 @@ class TrialMode:
     measure_seconds: int
     official: bool
     uses_official_resource_profile: bool
+    requires_stable_host: bool
     fixed_rate: float | None = None
 
 
@@ -88,6 +89,7 @@ TRIAL_MODES = {
         measure_seconds=SMOKE_MEASURE_SECONDS,
         official=False,
         uses_official_resource_profile=False,
+        requires_stable_host=False,
         fixed_rate=SMOKE_OFFERED_RATE,
     ),
     "calibration": TrialMode(
@@ -95,12 +97,28 @@ TRIAL_MODES = {
         measure_seconds=TRIAL_MEASURE_SECONDS,
         official=False,
         uses_official_resource_profile=True,
+        requires_stable_host=True,
     ),
     "trial": TrialMode(
         warm_seconds=TRIAL_WARM_SECONDS,
         measure_seconds=TRIAL_MEASURE_SECONDS,
         official=True,
         uses_official_resource_profile=True,
+        requires_stable_host=True,
+    ),
+    "lite-calibration": TrialMode(
+        warm_seconds=5,
+        measure_seconds=15,
+        official=False,
+        uses_official_resource_profile=True,
+        requires_stable_host=False,
+    ),
+    "lite-measurement": TrialMode(
+        warm_seconds=10,
+        measure_seconds=45,
+        official=False,
+        uses_official_resource_profile=True,
+        requires_stable_host=False,
     ),
 }
 
@@ -165,7 +183,7 @@ def write_result_bundle(output: Path, payload: dict[str, Any]) -> dict[str, Any]
     mode = payload.get("mode")
     configuration = TRIAL_MODES.get(str(mode))
     if configuration is None:
-        raise TrialError("mode must be smoke, calibration, or trial")
+        raise TrialError(f"unknown Trial mode: {mode}")
     if official and not configuration.official:
         raise TrialError(f"{mode} Trial bundles must be nonofficial")
 
@@ -900,6 +918,7 @@ def run_scenario_trial(
     offered_rate: float | None = None,
     reference_tokens: ReferenceTokenCorpus | None = None,
     pause_database_after: bool = False,
+    verify_conformance: bool = False,
 ) -> dict[str, Any]:
     """Execute one Scenario Trial lifecycle and write its raw bundle."""
     root = root.resolve()
@@ -909,7 +928,7 @@ def run_scenario_trial(
         raise TrialError(f"unknown Scenario: {scenario}")
     configuration = TRIAL_MODES.get(mode)
     if configuration is None:
-        raise TrialError("mode must be smoke, calibration, or trial")
+        raise TrialError(f"unknown Trial mode: {mode}")
     if configuration.fixed_rate is None:
         if offered_rate is None or offered_rate <= 0:
             raise TrialError(f"{mode} mode requires a positive offered rate")
@@ -920,6 +939,7 @@ def run_scenario_trial(
     measure_seconds = configuration.measure_seconds
     official = configuration.official
     uses_official_resource_profile = configuration.uses_official_resource_profile
+    requires_stable_host = configuration.requires_stable_host
 
     contender = _find_manifest(root, contender_id)
     manifest = describe_dataset(root)
@@ -958,12 +978,12 @@ def run_scenario_trial(
                 LOCAL_RESOURCE_PROFILE,
                 capture_host_observation(LOCAL_RESOURCE_PROFILE),
             )
-            if not preflight["valid"]:
+            if requires_stable_host and not preflight["valid"]:
                 raise TrialError(
                     "host preflight failed: " + ", ".join(preflight["reasons"])
                 )
             _apply_official_resource_profile(root, contender_id)
-        if official:
+        if official or verify_conformance:
             conformance = run_conformance_checks(root, contender_id, base_url)
         expected_warm = max(rate * warm_seconds * 2, 100)
         warm_workload = sample_workload(root, repetition, int(expected_warm))
@@ -1030,8 +1050,18 @@ def run_scenario_trial(
                     if uses_official_resource_profile
                     else None
                 ),
-                "hostExecution": host_execution if uses_official_resource_profile else None,
+                "hostExecution": host_execution if requires_stable_host else None,
             }
+        )
+        host_warnings = (
+            sorted(
+                {
+                    *(str(reason) for reason in (preflight or {}).get("reasons", [])),
+                    *(str(reason) for reason in host_execution.get("reasons", [])),
+                }
+            )
+            if uses_official_resource_profile and not requires_stable_host
+            else []
         )
         names = _resource_names(root, contender_id)
         contender_image_digest = image_digest(names.image)
@@ -1039,6 +1069,7 @@ def run_scenario_trial(
             output,
             {
                 "official": official,
+                **({"publishable": False} if mode.startswith("lite-") else {}),
                 "mode": mode,
                 "gitCommit": _git_commit(root),
                 "protocolVersion": _protocol_version(root),
@@ -1098,6 +1129,7 @@ def run_scenario_trial(
                 },
                 "validity": {
                     **validity,
+                    **({"warnings": host_warnings} if mode.startswith("lite-") else {}),
                     "k6SchedulingHealthy": parsed["droppedIterations"] == 0,
                     "k6CpuSaturated": k6_health["saturated"],
                     "k6CpuEvidence": k6_health,

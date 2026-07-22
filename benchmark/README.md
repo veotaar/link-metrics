@@ -83,6 +83,28 @@ uv run link-metrics capacity run express-node --scenario registration \
   --output /tmp/registration-series.json --root ..
 ```
 
+For quick local comparisons, `lite run` is an exploratory instrument rather than a
+smaller official protocol. It defaults to every discovered Contender and the
+`short-link-creation` and `uniform-resolution` Scenarios. Each Contender passes the
+conformance gate once, then each selected Scenario uses 15-second adaptive calibration
+samples and one 45-second confirmation measurement. Lite Trials retain the same Benchmark
+Dataset, request validation, container limits, and resource telemetry as official Trials,
+but host frequency and thermal excursions are warnings rather than blockers.
+
+Lite mode prints a terminal table and removes its temporary Trial bundles when it exits. Its
+results are prominently marked non-publishable and cannot be consumed by Result Series
+reporting or verification. `--scenario` is repeatable. The two-hour default budget is also
+the maximum; expiration prevents the next atomic Trial from starting, while an active Trial
+is allowed to finish and clean up.
+
+```sh
+uv run link-metrics lite run \
+  --scenario short-link-creation \
+  --scenario uniform-resolution \
+  --max-hours 2 \
+  --root ..
+```
+
 Cold startup is measured independently from warm capacity. It requires the same running
 PostgreSQL container and previously built Dataset template as a Trial, but no running
 Contender. `startup run` performs 20 process starts, resetting the ready Dataset before

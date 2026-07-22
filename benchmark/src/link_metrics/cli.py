@@ -22,6 +22,12 @@ from link_metrics.environment import (
     assess_host_preflight,
     capture_host_observation,
 )
+from link_metrics.lite import (
+    DEFAULT_LITE_SCENARIOS,
+    LiteError,
+    format_lite_results,
+    run_lite_exploration,
+)
 from link_metrics.progress import ExecutionBudget
 from link_metrics.reporting import write_reports
 from link_metrics.results import ResultError, run_capacity_sweep
@@ -135,6 +141,34 @@ def _parser() -> argparse.ArgumentParser:
     capacity_run.add_argument("--output", type=Path, required=True)
     capacity_run.add_argument("--root", type=Path, default=Path.cwd())
 
+    lite = groups.add_parser("lite", help="run fast non-publishable exploration")
+    lite_commands = lite.add_subparsers(dest="command", required=True)
+    lite_run = lite_commands.add_parser(
+        "run",
+        help="estimate capacity without producing a Result Series",
+    )
+    lite_run.add_argument(
+        "contender_ids",
+        nargs="*",
+        help="Contenders to explore; defaults to every discovered Contender",
+    )
+    lite_run.add_argument(
+        "--scenario",
+        action="append",
+        choices=SCENARIOS,
+        help=(
+            "Scenario to explore; repeat the option for more than one "
+            f"(default: {', '.join(DEFAULT_LITE_SCENARIOS)})"
+        ),
+    )
+    lite_run.add_argument(
+        "--max-hours",
+        type=float,
+        default=2,
+        help="stop starting Trials after this wall-clock budget (maximum: 2)",
+    )
+    lite_run.add_argument("--root", type=Path, default=Path.cwd())
+
     report = groups.add_parser("report", help="regenerate Result Series reports")
     report_commands = report.add_subparsers(dest="command", required=True)
     generate = report_commands.add_parser(
@@ -228,6 +262,17 @@ def main(argv: list[str] | None = None) -> int:
                 scenario=args.scenario,
                 output=args.output.resolve(),
             )
+        elif args.group == "lite":
+            root = args.root.resolve()
+            contenders = args.contender_ids or [
+                item["id"] for item in discover_contenders(root)
+            ]
+            output = run_lite_exploration(
+                root,
+                contenders,
+                scenarios=args.scenario or DEFAULT_LITE_SCENARIOS,
+                max_hours=args.max_hours,
+            )
         elif args.group == "report":
             output = write_reports(
                 [path.resolve() for path in args.raw_bundles],
@@ -264,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         ContenderRuntimeError,
         ContractLintError,
         DatasetError,
+        LiteError,
         ResultError,
         SeriesError,
         StartupError,
@@ -272,5 +318,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    print(json.dumps(output, indent=2, sort_keys=True))
+    if args.group == "lite":
+        print(format_lite_results(output))
+    else:
+        print(json.dumps(output, indent=2, sort_keys=True))
     return 0
